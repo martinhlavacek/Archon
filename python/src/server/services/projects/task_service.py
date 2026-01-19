@@ -716,10 +716,11 @@ class TaskService:
         Get task counts for all projects in a single optimized query.
 
         Returns task counts grouped by project_id and status.
+        Note: "review" status is merged into "doing" for frontend compatibility.
 
         Returns:
             Tuple of (success, counts_dict) where counts_dict is:
-            {"project-id": {"todo": 5, "doing": 2, "review": 3, "done": 10}}
+            {"project-id": {"todo": 5, "doing": 2, "done": 10}}
         """
         try:
             logger.debug("Fetching task counts for all projects in batch")
@@ -766,6 +767,12 @@ class TaskService:
 
                 if status in ["todo", "doing", "review", "done"]:
                     counts_by_project[project_id][status] += 1
+
+            # Merge "review" into "doing" for frontend compatibility
+            # Frontend expects 3 statuses: todo, doing, done
+            for project_id, counts in counts_by_project.items():
+                counts["doing"] = counts.get("doing", 0) + counts.get("review", 0)
+                counts.pop("review", None)
 
             logger.debug(f"Task counts fetched for {len(counts_by_project)} projects")
 
