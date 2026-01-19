@@ -36,9 +36,10 @@ from starlette.responses import JSONResponse
 # Add the project root to Python path for imports
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-# Load environment variables from the project root .env file
-project_root = Path(__file__).resolve().parent.parent
-dotenv_path = project_root / ".env"
+# Load environment variables from the Archon root .env file
+# Path: Archon/.env (3 levels up from mcp_server.py)
+archon_root = Path(__file__).resolve().parent.parent.parent.parent
+dotenv_path = archon_root / ".env"
 load_dotenv(dotenv_path, override=True)
 
 # Configure logging FIRST before any imports that might use it

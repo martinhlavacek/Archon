@@ -2,23 +2,71 @@
 Client Manager Service
 
 Manages database and API client connections.
+Supports both asyncpg (preferred for K8s) and Supabase (legacy) backends.
 """
 
 import os
 import re
 
-from supabase import Client, create_client
-
 from ..config.logfire_config import search_logger
 
+# Track which database mode we're using
+_database_mode: str | None = None
 
-def get_supabase_client() -> Client:
+
+def get_database_mode() -> str:
     """
-    Get a Supabase client instance.
+    Determine and cache which database mode to use.
+
+    Returns:
+        'asyncpg' if DATABASE_URL or POSTGRES_HOST is set, 'supabase' otherwise
+    """
+    global _database_mode
+    if _database_mode is None:
+        if os.getenv("DATABASE_URL"):
+            _database_mode = "asyncpg"
+            search_logger.info("Database mode: asyncpg (DATABASE_URL)")
+        elif os.getenv("POSTGRES_HOST"):
+            _database_mode = "asyncpg"
+            search_logger.info(f"Database mode: asyncpg (POSTGRES_HOST={os.getenv('POSTGRES_HOST')})")
+        elif os.getenv("SUPABASE_URL") and os.getenv("SUPABASE_SERVICE_KEY"):
+            _database_mode = "supabase"
+            search_logger.info("Database mode: supabase (SUPABASE_URL)")
+        else:
+            raise ValueError(
+                "Database configuration required. Set one of:\n"
+                "  - DATABASE_URL: PostgreSQL connection string (preferred for K8s)\n"
+                "  - POSTGRES_HOST + POSTGRES_USER + POSTGRES_PASSWORD: Individual params (K8s)\n"
+                "  - SUPABASE_URL + SUPABASE_SERVICE_KEY: Supabase credentials (legacy)"
+            )
+    return _database_mode
+
+
+def is_asyncpg_mode() -> bool:
+    """Check if using asyncpg mode."""
+    return get_database_mode() == "asyncpg"
+
+
+def get_supabase_client():
+    """
+    Get a Supabase client instance (legacy mode).
 
     Returns:
         Supabase client instance
+
+    Raises:
+        ValueError: If in asyncpg mode or Supabase not configured
     """
+    from supabase import Client, create_client
+
+    # Check if we should use Supabase
+    mode = get_database_mode()
+    if mode == "asyncpg":
+        raise ValueError(
+            "Supabase client not available in asyncpg mode. "
+            "Use AsyncPGClient from services.database instead."
+        )
+
     url = os.getenv("SUPABASE_URL")
     key = os.getenv("SUPABASE_SERVICE_KEY")
 
@@ -41,3 +89,24 @@ def get_supabase_client() -> Client:
     except Exception as e:
         search_logger.error(f"Failed to create Supabase client: {e}")
         raise
+
+
+def get_asyncpg_client():
+    """
+    Get the AsyncPGClient class for asyncpg mode.
+
+    Returns:
+        AsyncPGClient class (not instance - use class methods)
+
+    Raises:
+        ValueError: If not in asyncpg mode
+    """
+    mode = get_database_mode()
+    if mode != "asyncpg":
+        raise ValueError(
+            "AsyncPG client only available in asyncpg mode. "
+            "Set DATABASE_URL environment variable."
+        )
+
+    from .database import AsyncPGClient
+    return AsyncPGClient

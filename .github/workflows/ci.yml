@@ -256,45 +256,29 @@ jobs:
         run: |
           echo "# 🧪 Archon V2 Beta - CI Test Results" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
-          
-          # Frontend Results
-          echo "## 🎨 Frontend Tests (React + Vitest)" >> $GITHUB_STEP_SUMMARY
-          if [ -f "frontend-test-results/coverage/test-results.json" ]; then
-            echo "✅ Frontend tests completed" >> $GITHUB_STEP_SUMMARY
-          else
-            echo "❌ Frontend tests failed or incomplete" >> $GITHUB_STEP_SUMMARY
-          fi
+
+          # Use job results from needs context (more reliable than checking artifacts)
+          echo "## Test Results" >> $GITHUB_STEP_SUMMARY
+          echo "| Job | Status |" >> $GITHUB_STEP_SUMMARY
+          echo "|-----|--------|" >> $GITHUB_STEP_SUMMARY
+          echo "| 🎨 Frontend Tests | ${{ needs.frontend-tests.result }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| 🐍 Backend Tests | ${{ needs.backend-tests.result }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| 🐳 Docker Build Tests | ${{ needs.docker-build-test.result }} |" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
-          
-          # Backend Results
-          echo "## 🐍 Backend Tests (Python + pytest)" >> $GITHUB_STEP_SUMMARY
-          if [ -d "backend-test-results-unit" ]; then
-            echo "✅ Unit tests completed" >> $GITHUB_STEP_SUMMARY
-          else
-            echo "❌ Unit tests failed or incomplete" >> $GITHUB_STEP_SUMMARY
-          fi
-          
-          if [ -d "backend-test-results-integration" ]; then
-            echo "✅ Integration tests completed" >> $GITHUB_STEP_SUMMARY
-          else
-            echo "❌ Integration tests failed or incomplete" >> $GITHUB_STEP_SUMMARY
-          fi
-          echo "" >> $GITHUB_STEP_SUMMARY
-          
-          # Docker Build Results
-          echo "## 🐳 Docker Build Tests" >> $GITHUB_STEP_SUMMARY
-          echo "Docker build tests completed - check individual job results" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          
-          # Coverage Information
+
+          # Backend artifacts check
           echo "## 📊 Coverage Reports" >> $GITHUB_STEP_SUMMARY
-          echo "Coverage reports have been uploaded to Codecov and are available as artifacts." >> $GITHUB_STEP_SUMMARY
+          if [ -d "backend-test-results" ]; then
+            echo "✅ Backend coverage reports available as artifacts" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "ℹ️ No coverage artifacts found" >> $GITHUB_STEP_SUMMARY
+          fi
           echo "" >> $GITHUB_STEP_SUMMARY
-          
+
           # Architecture Context
           echo "## 🏗️ Architecture Tested" >> $GITHUB_STEP_SUMMARY
           echo "- **Frontend**: React + TypeScript + Vite (Port 3737)" >> $GITHUB_STEP_SUMMARY
           echo "- **Server**: FastAPI + Socket.IO + Python (Port 8181)" >> $GITHUB_STEP_SUMMARY
           echo "- **MCP Service**: MCP protocol server (Port 8051)" >> $GITHUB_STEP_SUMMARY
           echo "- **Agents Service**: PydanticAI agents (Port 8052)" >> $GITHUB_STEP_SUMMARY
-          echo "- **Database**: Supabase (PostgreSQL + pgvector)" >> $GITHUB_STEP_SUMMARY
+          echo "- **Database**: PostgreSQL + pgvector (asyncpg or Supabase)" >> $GITHUB_STEP_SUMMARY

@@ -10,13 +10,15 @@ It combines multiple RAG strategies in a pipeline fashion:
 4. + Agentic RAG (if enabled) - enhanced code example search
 
 Multiple strategies can be enabled simultaneously and work together.
+
+Supports both asyncpg (K8s) and Supabase (legacy) database backends.
 """
 
 import os
 from typing import Any
 
 from ...config.logfire_config import get_logger, safe_span
-from ...utils import get_supabase_client
+from ..client_manager import get_database_mode, is_asyncpg_mode
 from ..embeddings.embedding_service import create_embedding
 from .agentic_rag_strategy import AgenticRAGStrategy
 
@@ -38,14 +40,15 @@ class RAGService:
 
     def __init__(self, supabase_client=None):
         """Initialize RAG service as a coordinator for search strategies"""
-        self.supabase_client = supabase_client or get_supabase_client()
+        self._supabase_client = supabase_client
+        self._mode = get_database_mode()
 
         # Initialize base strategy (always needed)
-        self.base_strategy = BaseSearchStrategy(self.supabase_client)
+        self.base_strategy = BaseSearchStrategy(supabase_client)
 
         # Initialize optional strategies
-        self.hybrid_strategy = HybridSearchStrategy(self.supabase_client, self.base_strategy)
-        self.agentic_strategy = AgenticRAGStrategy(self.supabase_client, self.base_strategy)
+        self.hybrid_strategy = HybridSearchStrategy(supabase_client, self.base_strategy)
+        self.agentic_strategy = AgenticRAGStrategy(supabase_client, self.base_strategy)
 
         # Initialize reranking strategy based on settings
         self.reranking_strategy = None
@@ -57,6 +60,16 @@ class RAGService:
             except Exception as e:
                 logger.warning(f"Failed to load reranking strategy: {e}")
                 self.reranking_strategy = None
+
+    @property
+    def supabase_client(self):
+        """Lazy load Supabase client for legacy mode."""
+        if self._mode != "supabase":
+            raise ValueError("Supabase client not available in asyncpg mode")
+        if self._supabase_client is None:
+            from src.server.utils import get_supabase_client
+            self._supabase_client = get_supabase_client()
+        return self._supabase_client
 
     def get_setting(self, key: str, default: str = "false") -> str:
         """Get a setting from the credential service or fall back to environment variable."""
@@ -208,30 +221,14 @@ class RAGService:
             aggregate_score = avg_similarity * (1 + match_boost)
 
             # Query page by page_id if available, otherwise by URL
-            if data["page_id"]:
-                page_info = (
-                    self.supabase_client.table("archon_page_metadata")
-                    .select("id, url, section_title, word_count")
-                    .eq("id", data["page_id"])
-                    .maybe_single()
-                    .execute()
-                )
-            else:
-                # Regular pages - exact URL match
-                page_info = (
-                    self.supabase_client.table("archon_page_metadata")
-                    .select("id, url, section_title, word_count")
-                    .eq("url", data["url"])
-                    .maybe_single()
-                    .execute()
-                )
+            page_info_data = await self._get_page_info(data["page_id"], data["url"])
 
-            if page_info and page_info.data is not None:
+            if page_info_data:
                 page_results.append({
-                    "page_id": page_info.data["id"],
-                    "url": page_info.data["url"],
-                    "section_title": page_info.data.get("section_title"),
-                    "word_count": page_info.data.get("word_count", 0),
+                    "page_id": str(page_info_data["id"]),
+                    "url": page_info_data["url"],
+                    "section_title": page_info_data.get("section_title"),
+                    "word_count": page_info_data.get("word_count", 0),
                     "chunk_matches": data["chunk_matches"],
                     "aggregate_similarity": aggregate_score,
                     "average_similarity": avg_similarity,
@@ -240,6 +237,55 @@ class RAGService:
 
         page_results.sort(key=lambda x: x["aggregate_similarity"], reverse=True)
         return page_results[:match_count]
+
+    async def _get_page_info(self, page_id: str | None, url: str | None) -> dict[str, Any] | None:
+        """Get page info by page_id or URL."""
+        if is_asyncpg_mode():
+            return await self._get_page_info_asyncpg(page_id, url)
+        else:
+            return self._get_page_info_supabase(page_id, url)
+
+    async def _get_page_info_asyncpg(self, page_id: str | None, url: str | None) -> dict[str, Any] | None:
+        """Get page info using asyncpg."""
+        from ..database import AsyncPGClient
+
+        if page_id:
+            row = await AsyncPGClient.fetchrow(
+                "SELECT id, url, section_title, word_count FROM archon_page_metadata WHERE id = $1",
+                page_id
+            )
+        else:
+            row = await AsyncPGClient.fetchrow(
+                "SELECT id, url, section_title, word_count FROM archon_page_metadata WHERE url = $1",
+                url
+            )
+
+        if row:
+            return dict(row)
+        return None
+
+    def _get_page_info_supabase(self, page_id: str | None, url: str | None) -> dict[str, Any] | None:
+        """Get page info using Supabase (legacy)."""
+        if page_id:
+            page_info = (
+                self.supabase_client.table("archon_page_metadata")
+                .select("id, url, section_title, word_count")
+                .eq("id", page_id)
+                .maybe_single()
+                .execute()
+            )
+        else:
+            page_info = (
+                self.supabase_client.table("archon_page_metadata")
+                .select("id, url, section_title, word_count")
+                .eq("url", url)
+                .maybe_single()
+                .execute()
+            )
+
+        if page_info and page_info.data is not None:
+            return page_info.data
+        return None
 
     async def perform_rag_query(
         self, query: str, source: str = None, match_count: int = 5, return_mode: str = "chunks"

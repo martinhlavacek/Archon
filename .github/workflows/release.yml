@@ -1,0 +1,390 @@
+name: Release (Production)
+
+# Release workflow for production deployments.
+# Triggers on push to release branch.
+#
+# This workflow:
+# 1. Detects which components changed since last release
+# 2. Calculates new version based on conventional commits:
+#    - feat: → minor bump (0.1.0 → 0.2.0)
+#    - fix:/chore:/refactor: → patch bump (0.1.0 → 0.1.1)
+#    - BREAKING CHANGE or !: → major bump (0.1.0 → 1.0.0)
+# 3. Re-tags :dev images to new version (no rebuild)
+# 4. Creates git tags for tracking
+#
+# Components:
+# - archon-api (FastAPI server)
+# - archon-ui (React frontend)
+# - archon-mcp (MCP protocol server)
+
+on:
+  push:
+    branches: [release]
+    paths:
+      - 'python/**'
+      - 'archon-ui-main/**'
+      - '.github/workflows/release.yml'
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: 'Dry run (no publish/deploy)'
+        type: boolean
+        default: false
+
+env:
+  REGISTRY: ghcr.io
+  ARCHON_API_IMAGE: ghcr.io/${{ github.repository_owner }}/archon-api
+  ARCHON_UI_IMAGE: ghcr.io/${{ github.repository_owner }}/archon-ui
+  ARCHON_MCP_IMAGE: ghcr.io/${{ github.repository_owner }}/archon-mcp
+
+jobs:
+  detect-and-version:
+    runs-on: ubuntu-latest
+    outputs:
+      api_affected: ${{ steps.affected.outputs.api_affected }}
+      ui_affected: ${{ steps.affected.outputs.ui_affected }}
+      mcp_affected: ${{ steps.affected.outputs.mcp_affected }}
+      api_version: ${{ steps.versions.outputs.api_version }}
+      ui_version: ${{ steps.versions.outputs.ui_version }}
+      mcp_version: ${{ steps.versions.outputs.mcp_version }}
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Configure Git
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+      - name: Check affected components
+        id: affected
+        run: |
+          # For workflow_dispatch, all affected
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "Manual trigger - all components considered affected"
+            echo "api_affected=true" >> $GITHUB_OUTPUT
+            echo "ui_affected=true" >> $GITHUB_OUTPUT
+            echo "mcp_affected=true" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+
+          # Check API affected
+          API_AFFECTED=false
+          LAST_API_TAG=$(git tag -l 'archon-api@*' --sort=-v:refname | head -n1)
+          if [ -n "$LAST_API_TAG" ]; then
+            API_BASE="$LAST_API_TAG"
+          else
+            API_BASE="HEAD~10"
+          fi
+          echo "API base ref: $API_BASE"
+
+          API_COMMITS=$(git log $API_BASE..HEAD --oneline -- \
+            'python/src/server/' \
+            'python/src/config/' \
+            'python/pyproject.toml' \
+            'python/Dockerfile.server' \
+            2>/dev/null | grep -v "chore(release): sync" || echo "")
+
+          if [ -n "$API_COMMITS" ]; then
+            API_AFFECTED=true
+            echo "archon-api is affected"
+            echo "$API_COMMITS"
+          fi
+
+          # Check UI affected
+          UI_AFFECTED=false
+          LAST_UI_TAG=$(git tag -l 'archon-ui@*' --sort=-v:refname | head -n1)
+          if [ -n "$LAST_UI_TAG" ]; then
+            UI_BASE="$LAST_UI_TAG"
+          else
+            UI_BASE="HEAD~10"
+          fi
+          echo "UI base ref: $UI_BASE"
+
+          UI_COMMITS=$(git log $UI_BASE..HEAD --oneline -- \
+            'archon-ui-main/' \
+            2>/dev/null | grep -v "chore(release): sync" || echo "")
+
+          if [ -n "$UI_COMMITS" ]; then
+            UI_AFFECTED=true
+            echo "archon-ui is affected"
+            echo "$UI_COMMITS"
+          fi
+
+          # Check MCP affected
+          MCP_AFFECTED=false
+          LAST_MCP_TAG=$(git tag -l 'archon-mcp@*' --sort=-v:refname | head -n1)
+          if [ -n "$LAST_MCP_TAG" ]; then
+            MCP_BASE="$LAST_MCP_TAG"
+          else
+            MCP_BASE="HEAD~10"
+          fi
+          echo "MCP base ref: $MCP_BASE"
+
+          MCP_COMMITS=$(git log $MCP_BASE..HEAD --oneline -- \
+            'python/src/mcp/' \
+            'python/src/config/' \
+            'python/pyproject.toml' \
+            'python/Dockerfile.mcp' \
+            2>/dev/null | grep -v "chore(release): sync" || echo "")
+
+          if [ -n "$MCP_COMMITS" ]; then
+            MCP_AFFECTED=true
+            echo "archon-mcp is affected"
+            echo "$MCP_COMMITS"
+          fi
+
+          echo "api_affected=$API_AFFECTED" >> $GITHUB_OUTPUT
+          echo "ui_affected=$UI_AFFECTED" >> $GITHUB_OUTPUT
+          echo "mcp_affected=$MCP_AFFECTED" >> $GITHUB_OUTPUT
+
+          echo ""
+          echo "=== Affected Summary ==="
+          echo "archon-api: $API_AFFECTED"
+          echo "archon-ui: $UI_AFFECTED"
+          echo "archon-mcp: $MCP_AFFECTED"
+
+      - name: Calculate versions
+        id: versions
+        run: |
+          # Function to calculate new version based on conventional commits
+          calculate_version() {
+            local TAG_PREFIX=$1
+            local APP_PATHS=$2
+            local CURRENT_VERSION=$3
+
+            LAST_TAG=$(git tag -l "$TAG_PREFIX@*" --sort=-v:refname | head -n1)
+
+            if [ -z "$LAST_TAG" ]; then
+              echo "$CURRENT_VERSION"
+              return
+            fi
+
+            COMMITS=$(git log "$LAST_TAG"..HEAD --oneline -- $APP_PATHS 2>/dev/null | grep -v "chore(release): sync" || echo "")
+
+            if [ -z "$COMMITS" ]; then
+              echo "$CURRENT_VERSION"
+              return
+            fi
+
+            # Analyze commits for version bump type
+            BUMP_TYPE="patch"
+
+            # Check for breaking changes (major)
+            if echo "$COMMITS" | grep -iE "(BREAKING CHANGE|^[a-z]+\!:)" > /dev/null; then
+              BUMP_TYPE="major"
+            # Check for features (minor)
+            elif echo "$COMMITS" | grep -E "^[a-f0-9]+ feat(\(.+\))?:" > /dev/null; then
+              BUMP_TYPE="minor"
+            fi
+
+            # Parse current version and calculate new version
+            MAJOR=$(echo $CURRENT_VERSION | cut -d. -f1)
+            MINOR=$(echo $CURRENT_VERSION | cut -d. -f2)
+            PATCH=$(echo $CURRENT_VERSION | cut -d. -f3)
+
+            case $BUMP_TYPE in
+              major)
+                echo "$((MAJOR + 1)).0.0"
+                ;;
+              minor)
+                echo "$MAJOR.$((MINOR + 1)).0"
+                ;;
+              patch)
+                echo "$MAJOR.$MINOR.$((PATCH + 1))"
+                ;;
+            esac
+          }
+
+          # Get current versions from source files
+          API_CURRENT=$(grep -oP 'version = "\K[^"]+' python/pyproject.toml | head -1)
+          UI_CURRENT=$(node -p "require('./archon-ui-main/package.json').version")
+          MCP_CURRENT=$API_CURRENT  # MCP uses same pyproject.toml version
+
+          echo "Current versions:"
+          echo "  API: $API_CURRENT"
+          echo "  UI: $UI_CURRENT"
+          echo "  MCP: $MCP_CURRENT"
+
+          # Calculate new versions
+          API_VERSION=$(calculate_version "archon-api" "python/src/server/ python/src/config/ python/pyproject.toml python/Dockerfile.server" "$API_CURRENT")
+          UI_VERSION=$(calculate_version "archon-ui" "archon-ui-main/" "$UI_CURRENT")
+          MCP_VERSION=$(calculate_version "archon-mcp" "python/src/mcp/ python/src/config/ python/pyproject.toml python/Dockerfile.mcp" "$MCP_CURRENT")
+
+          echo ""
+          echo "New versions:"
+          echo "  API: $API_VERSION"
+          echo "  UI: $UI_VERSION"
+          echo "  MCP: $MCP_VERSION"
+
+          echo "api_version=$API_VERSION" >> $GITHUB_OUTPUT
+          echo "ui_version=$UI_VERSION" >> $GITHUB_OUTPUT
+          echo "mcp_version=$MCP_VERSION" >> $GITHUB_OUTPUT
+
+      - name: Create release tags
+        if: "!inputs.dry_run"
+        run: |
+          # Create tags for affected components
+          if [ "${{ steps.affected.outputs.api_affected }}" = "true" ]; then
+            API_TAG="archon-api@${{ steps.versions.outputs.api_version }}"
+            if ! git tag -l "$API_TAG" | grep -q "$API_TAG"; then
+              git tag -a "$API_TAG" -m "Release $API_TAG"
+              echo "Created tag: $API_TAG"
+            fi
+          fi
+
+          if [ "${{ steps.affected.outputs.ui_affected }}" = "true" ]; then
+            UI_TAG="archon-ui@${{ steps.versions.outputs.ui_version }}"
+            if ! git tag -l "$UI_TAG" | grep -q "$UI_TAG"; then
+              git tag -a "$UI_TAG" -m "Release $UI_TAG"
+              echo "Created tag: $UI_TAG"
+            fi
+          fi
+
+          if [ "${{ steps.affected.outputs.mcp_affected }}" = "true" ]; then
+            MCP_TAG="archon-mcp@${{ steps.versions.outputs.mcp_version }}"
+            if ! git tag -l "$MCP_TAG" | grep -q "$MCP_TAG"; then
+              git tag -a "$MCP_TAG" -m "Release $MCP_TAG"
+              echo "Created tag: $MCP_TAG"
+            fi
+          fi
+
+          # Push tags
+          git push origin --tags
+
+  # Re-tag API image
+  release-api:
+    needs: [detect-and-version]
+    runs-on: ubuntu-latest
+    if: needs.detect-and-version.outputs.api_affected == 'true' && !inputs.dry_run
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Re-tag API image
+        run: |
+          VERSION="${{ needs.detect-and-version.outputs.api_version }}"
+          echo "Re-tagging ${{ env.ARCHON_API_IMAGE }}:dev to $VERSION"
+
+          # Pull dev image
+          docker pull ${{ env.ARCHON_API_IMAGE }}:dev
+
+          # Tag with version
+          docker tag ${{ env.ARCHON_API_IMAGE }}:dev ${{ env.ARCHON_API_IMAGE }}:$VERSION
+          docker tag ${{ env.ARCHON_API_IMAGE }}:dev ${{ env.ARCHON_API_IMAGE }}:latest
+
+          # Push
+          docker push ${{ env.ARCHON_API_IMAGE }}:$VERSION
+          docker push ${{ env.ARCHON_API_IMAGE }}:latest
+
+          echo "Published: ${{ env.ARCHON_API_IMAGE }}:$VERSION"
+
+  # Re-tag UI image
+  release-ui:
+    needs: [detect-and-version]
+    runs-on: ubuntu-latest
+    if: needs.detect-and-version.outputs.ui_affected == 'true' && !inputs.dry_run
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Re-tag UI image
+        run: |
+          VERSION="${{ needs.detect-and-version.outputs.ui_version }}"
+          echo "Re-tagging ${{ env.ARCHON_UI_IMAGE }}:dev to $VERSION"
+
+          # Pull dev image
+          docker pull ${{ env.ARCHON_UI_IMAGE }}:dev
+
+          # Tag with version
+          docker tag ${{ env.ARCHON_UI_IMAGE }}:dev ${{ env.ARCHON_UI_IMAGE }}:$VERSION
+          docker tag ${{ env.ARCHON_UI_IMAGE }}:dev ${{ env.ARCHON_UI_IMAGE }}:latest
+
+          # Push
+          docker push ${{ env.ARCHON_UI_IMAGE }}:$VERSION
+          docker push ${{ env.ARCHON_UI_IMAGE }}:latest
+
+          echo "Published: ${{ env.ARCHON_UI_IMAGE }}:$VERSION"
+
+  # Re-tag MCP image
+  release-mcp:
+    needs: [detect-and-version]
+    runs-on: ubuntu-latest
+    if: needs.detect-and-version.outputs.mcp_affected == 'true' && !inputs.dry_run
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Re-tag MCP image
+        run: |
+          VERSION="${{ needs.detect-and-version.outputs.mcp_version }}"
+          echo "Re-tagging ${{ env.ARCHON_MCP_IMAGE }}:dev to $VERSION"
+
+          # Pull dev image
+          docker pull ${{ env.ARCHON_MCP_IMAGE }}:dev
+
+          # Tag with version
+          docker tag ${{ env.ARCHON_MCP_IMAGE }}:dev ${{ env.ARCHON_MCP_IMAGE }}:$VERSION
+          docker tag ${{ env.ARCHON_MCP_IMAGE }}:dev ${{ env.ARCHON_MCP_IMAGE }}:latest
+
+          # Push
+          docker push ${{ env.ARCHON_MCP_IMAGE }}:$VERSION
+          docker push ${{ env.ARCHON_MCP_IMAGE }}:latest
+
+          echo "Published: ${{ env.ARCHON_MCP_IMAGE }}:$VERSION"
+
+  # Summary
+  summary:
+    needs: [detect-and-version, release-api, release-ui, release-mcp]
+    runs-on: ubuntu-latest
+    if: always()
+    steps:
+      - name: Summary
+        run: |
+          echo "## Release Summary" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### Versions" >> $GITHUB_STEP_SUMMARY
+          echo "| Component | Version | Status |" >> $GITHUB_STEP_SUMMARY
+          echo "|-----------|---------|--------|" >> $GITHUB_STEP_SUMMARY
+          echo "| archon-api | ${{ needs.detect-and-version.outputs.api_version }} | ${{ needs.release-api.result || 'skipped' }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| archon-ui | ${{ needs.detect-and-version.outputs.ui_version }} | ${{ needs.release-ui.result || 'skipped' }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| archon-mcp | ${{ needs.detect-and-version.outputs.mcp_version }} | ${{ needs.release-mcp.result || 'skipped' }} |" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### Images Published" >> $GITHUB_STEP_SUMMARY
+          if [ "${{ needs.detect-and-version.outputs.api_affected }}" = "true" ]; then
+            echo "- \`${{ env.ARCHON_API_IMAGE }}:${{ needs.detect-and-version.outputs.api_version }}\`" >> $GITHUB_STEP_SUMMARY
+          fi
+          if [ "${{ needs.detect-and-version.outputs.ui_affected }}" = "true" ]; then
+            echo "- \`${{ env.ARCHON_UI_IMAGE }}:${{ needs.detect-and-version.outputs.ui_version }}\`" >> $GITHUB_STEP_SUMMARY
+          fi
+          if [ "${{ needs.detect-and-version.outputs.mcp_affected }}" = "true" ]; then
+            echo "- \`${{ env.ARCHON_MCP_IMAGE }}:${{ needs.detect-and-version.outputs.mcp_version }}\`" >> $GITHUB_STEP_SUMMARY
+          fi
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Commit:** ${{ github.sha }}" >> $GITHUB_STEP_SUMMARY

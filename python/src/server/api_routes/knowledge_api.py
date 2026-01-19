@@ -242,7 +242,7 @@ async def get_knowledge_items(
     """Get knowledge items with pagination and filtering."""
     try:
         # Use KnowledgeItemService
-        service = KnowledgeItemService(get_supabase_client())
+        service = KnowledgeItemService()
         result = await service.list_items(
             page=page, per_page=per_page, knowledge_type=knowledge_type, search=search
         )
@@ -273,7 +273,7 @@ async def get_knowledge_items_summary(
         # Input guards
         page = max(1, page)
         per_page = min(100, max(1, per_page))
-        service = KnowledgeSummaryService(get_supabase_client())
+        service = KnowledgeSummaryService()
         result = await service.get_summaries(
             page=page, per_page=per_page, knowledge_type=knowledge_type, search=search
         )
@@ -291,7 +291,7 @@ async def update_knowledge_item(source_id: str, updates: dict):
     """Update a knowledge item's metadata."""
     try:
         # Use KnowledgeItemService
-        service = KnowledgeItemService(get_supabase_client())
+        service = KnowledgeItemService()
         success, result = await service.update_item(source_id, updates)
 
         if success:
@@ -322,11 +322,11 @@ async def delete_knowledge_item(source_id: str):
         logger.debug("Creating SourceManagementService...")
         from ..services.source_management_service import SourceManagementService
 
-        source_service = SourceManagementService(get_supabase_client())
+        source_service = SourceManagementService()
         logger.debug("Successfully created SourceManagementService")
 
         logger.debug("Calling delete_source function...")
-        success, result_data = source_service.delete_source(source_id)
+        success, result_data = await source_service.delete_source(source_id)
         logger.debug(f"delete_source returned: success={success}, data={result_data}")
 
         # Convert to expected format
@@ -390,50 +390,93 @@ async def get_knowledge_item_chunks(
             f"limit={limit} | offset={offset}"
         )
 
-        supabase = get_supabase_client()
+        from ..services.client_manager import is_asyncpg_mode
 
-        # First get total count
-        count_query = supabase.from_("archon_crawled_pages").select(
-            "id", count="exact", head=True
-        )
-        count_query = count_query.eq("source_id", source_id)
+        if is_asyncpg_mode():
+            from ..services.database import AsyncPGClient
 
-        if domain_filter:
-            count_query = count_query.ilike("url", f"%{domain_filter}%")
+            # Build count query
+            count_sql = "SELECT COUNT(*) FROM archon_crawled_pages WHERE source_id = $1"
+            count_params = [source_id]
 
-        count_result = count_query.execute()
-        total = count_result.count if hasattr(count_result, "count") else 0
+            if domain_filter:
+                count_sql += " AND url ILIKE $2"
+                count_params.append(f"%{domain_filter}%")
 
-        # Build the main query with pagination
-        query = supabase.from_("archon_crawled_pages").select(
-            "id, source_id, content, metadata, url"
-        )
-        query = query.eq("source_id", source_id)
+            count_result = await AsyncPGClient.fetchrow(count_sql, *count_params)
+            total = count_result["count"] if count_result else 0
 
-        # Apply domain filtering if provided
-        if domain_filter:
-            query = query.ilike("url", f"%{domain_filter}%")
+            # Build main query with pagination
+            main_sql = """
+                SELECT id, source_id, content, metadata, url
+                FROM archon_crawled_pages
+                WHERE source_id = $1
+            """
+            main_params = [source_id]
+            param_idx = 2
 
-        # Deterministic ordering (URL then id)
-        query = query.order("url", desc=False).order("id", desc=False)
+            if domain_filter:
+                main_sql += f" AND url ILIKE ${param_idx}"
+                main_params.append(f"%{domain_filter}%")
+                param_idx += 1
 
-        # Apply pagination
-        query = query.range(offset, offset + limit - 1)
+            main_sql += f" ORDER BY url ASC, id ASC LIMIT ${param_idx} OFFSET ${param_idx + 1}"
+            main_params.extend([limit, offset])
 
-        result = query.execute()
-        # Check for error more explicitly to work with mocks
-        if hasattr(result, "error") and result.error is not None:
-            safe_logfire_error(
-                f"Supabase query error | source_id={source_id} | error={result.error}"
+            rows = await AsyncPGClient.fetch(main_sql, *main_params)
+            chunks = [dict(row) for row in rows] if rows else []
+        else:
+            supabase = get_supabase_client()
+
+            # First get total count
+            count_query = supabase.from_("archon_crawled_pages").select(
+                "id", count="exact", head=True
             )
-            raise HTTPException(status_code=500, detail={"error": str(result.error)})
+            count_query = count_query.eq("source_id", source_id)
 
-        chunks = result.data if result.data else []
+            if domain_filter:
+                count_query = count_query.ilike("url", f"%{domain_filter}%")
+
+            count_result = count_query.execute()
+            total = count_result.count if hasattr(count_result, "count") else 0
+
+            # Build the main query with pagination
+            query = supabase.from_("archon_crawled_pages").select(
+                "id, source_id, content, metadata, url"
+            )
+            query = query.eq("source_id", source_id)
+
+            # Apply domain filtering if provided
+            if domain_filter:
+                query = query.ilike("url", f"%{domain_filter}%")
+
+            # Deterministic ordering (URL then id)
+            query = query.order("url", desc=False).order("id", desc=False)
+
+            # Apply pagination
+            query = query.range(offset, offset + limit - 1)
+
+            result = query.execute()
+            # Check for error more explicitly to work with mocks
+            if hasattr(result, "error") and result.error is not None:
+                safe_logfire_error(
+                    f"Supabase query error | source_id={source_id} | error={result.error}"
+                )
+                raise HTTPException(status_code=500, detail={"error": str(result.error)})
+
+            chunks = result.data if result.data else []
 
         # Extract useful fields from metadata to top level for frontend
         # This ensures the API response matches the TypeScript DocumentChunk interface
         for chunk in chunks:
             metadata = chunk.get("metadata", {}) or {}
+            # Handle case where metadata is a JSON string (asyncpg returns JSONB as dict, but just in case)
+            if isinstance(metadata, str):
+                import json
+                try:
+                    metadata = json.loads(metadata)
+                except (json.JSONDecodeError, TypeError):
+                    metadata = {}
 
             # Generate meaningful titles from available data
             title = None
@@ -546,40 +589,72 @@ async def get_knowledge_item_code_examples(
             f"Fetching code examples | source_id={source_id} | limit={limit} | offset={offset}"
         )
 
-        supabase = get_supabase_client()
+        from ..services.client_manager import is_asyncpg_mode
 
-        # First get total count
-        count_result = (
-            supabase.from_("archon_code_examples")
-            .select("id", count="exact", head=True)
-            .eq("source_id", source_id)
-            .execute()
-        )
-        total = count_result.count if hasattr(count_result, "count") else 0
+        if is_asyncpg_mode():
+            from ..services.database import AsyncPGClient
 
-        # Get paginated code examples
-        result = (
-            supabase.from_("archon_code_examples")
-            .select("id, source_id, content, summary, metadata")
-            .eq("source_id", source_id)
-            .order("id", desc=False)  # Deterministic ordering
-            .range(offset, offset + limit - 1)
-            .execute()
-        )
-
-        # Check for error to match chunks endpoint pattern
-        if hasattr(result, "error") and result.error is not None:
-            safe_logfire_error(
-                f"Supabase query error (code examples) | source_id={source_id} | error={result.error}"
+            # Get total count
+            count_result = await AsyncPGClient.fetchrow(
+                "SELECT COUNT(*) FROM archon_code_examples WHERE source_id = $1",
+                source_id
             )
-            raise HTTPException(status_code=500, detail={"error": str(result.error)})
+            total = count_result["count"] if count_result else 0
 
-        code_examples = result.data if result.data else []
+            # Get paginated code examples
+            rows = await AsyncPGClient.fetch(
+                """
+                SELECT id, source_id, content, summary, metadata
+                FROM archon_code_examples
+                WHERE source_id = $1
+                ORDER BY id ASC
+                LIMIT $2 OFFSET $3
+                """,
+                source_id, limit, offset
+            )
+            code_examples = [dict(row) for row in rows] if rows else []
+        else:
+            supabase = get_supabase_client()
+
+            # First get total count
+            count_result = (
+                supabase.from_("archon_code_examples")
+                .select("id", count="exact", head=True)
+                .eq("source_id", source_id)
+                .execute()
+            )
+            total = count_result.count if hasattr(count_result, "count") else 0
+
+            # Get paginated code examples
+            result = (
+                supabase.from_("archon_code_examples")
+                .select("id, source_id, content, summary, metadata")
+                .eq("source_id", source_id)
+                .order("id", desc=False)  # Deterministic ordering
+                .range(offset, offset + limit - 1)
+                .execute()
+            )
+
+            # Check for error to match chunks endpoint pattern
+            if hasattr(result, "error") and result.error is not None:
+                safe_logfire_error(
+                    f"Supabase query error (code examples) | source_id={source_id} | error={result.error}"
+                )
+                raise HTTPException(status_code=500, detail={"error": str(result.error)})
+
+            code_examples = result.data if result.data else []
 
         # Extract title and example_name from metadata to top level for frontend
         # This ensures the API response matches the TypeScript CodeExample interface
         for example in code_examples:
             metadata = example.get("metadata", {}) or {}
+            # Handle case where metadata is a JSON string
+            if isinstance(metadata, str):
+                import json
+                try:
+                    metadata = json.loads(metadata)
+                except (json.JSONDecodeError, TypeError):
+                    metadata = {}
             # Extract fields to match frontend TypeScript types
             example["title"] = metadata.get("title")  # AI-generated title
             example["example_name"] = metadata.get("example_name")  # Same as title for compatibility
@@ -624,7 +699,7 @@ async def refresh_knowledge_item(source_id: str):
         safe_logfire_info(f"Starting knowledge item refresh | source_id={source_id}")
 
         # Get the existing knowledge item
-        service = KnowledgeItemService(get_supabase_client())
+        service = KnowledgeItemService()
         existing_item = await service.get_item(source_id)
 
         if not existing_item:
@@ -674,9 +749,8 @@ async def refresh_knowledge_item(source_id: str):
             )
 
         # Use the same crawl orchestration as regular crawl
-        crawl_service = CrawlingService(
-            crawler=crawler, supabase_client=get_supabase_client()
-        )
+        # CrawlingService handles database mode (asyncpg/supabase) internally
+        crawl_service = CrawlingService(crawler=crawler)
         crawl_service.set_progress_id(progress_id)
 
         # Start the crawl task with proper request format
@@ -828,8 +902,8 @@ async def _perform_crawl_with_progress(
                 await tracker.error(f"Failed to initialize crawler: {str(e)}")
                 return
 
-            supabase_client = get_supabase_client()
-            orchestration_service = CrawlingService(crawler, supabase_client)
+            # CrawlingService handles database mode (asyncpg/supabase) internally
+            orchestration_service = CrawlingService(crawler)
             orchestration_service.set_progress_id(progress_id)
 
             # Convert request to dict for service
@@ -1028,7 +1102,7 @@ async def _perform_upload_with_progress(
             return
 
         # Use DocumentStorageService to handle the upload
-        doc_storage_service = DocumentStorageService(get_supabase_client())
+        doc_storage_service = DocumentStorageService()
 
         # Generate source_id from filename with UUID to prevent collisions
         source_id = f"file_{filename.replace(' ', '_').replace('.', '_')}_{uuid.uuid4().hex[:8]}"
@@ -1118,7 +1192,7 @@ async def perform_rag_query(request: RagQueryRequest):
 
     try:
         # Use RAGService for unified RAG query with return_mode support
-        search_service = RAGService(get_supabase_client())
+        search_service = RAGService()
         success, result = await search_service.perform_rag_query(
             query=request.query,
             source=request.source,
@@ -1148,7 +1222,7 @@ async def search_code_examples(request: RagQueryRequest):
     """Search for code examples relevant to the query using dedicated code examples service."""
     try:
         # Use RAGService for code examples search
-        search_service = RAGService(get_supabase_client())
+        search_service = RAGService()
         success, result = await search_service.search_code_examples_service(
             query=request.query,
             source_id=request.source,  # This is Optional[str] which matches the method signature
@@ -1191,7 +1265,7 @@ async def get_available_sources():
     """Get all available sources for RAG queries."""
     try:
         # Use KnowledgeItemService
-        service = KnowledgeItemService(get_supabase_client())
+        service = KnowledgeItemService()
         result = await service.get_available_sources()
 
         # Parse result if it's a string
@@ -1213,9 +1287,9 @@ async def delete_source(source_id: str):
         # Use SourceManagementService directly
         from ..services.source_management_service import SourceManagementService
 
-        source_service = SourceManagementService(get_supabase_client())
+        source_service = SourceManagementService()
 
-        success, result_data = source_service.delete_source(source_id)
+        success, result_data = await source_service.delete_source(source_id)
 
         if success:
             safe_logfire_info(f"Source deleted successfully | source_id={source_id}")
@@ -1244,7 +1318,7 @@ async def get_database_metrics():
     """Get database metrics and statistics."""
     try:
         # Use DatabaseMetricsService
-        service = DatabaseMetricsService(get_supabase_client())
+        service = DatabaseMetricsService()
         metrics = await service.get_metrics()
         return metrics
     except Exception as e:

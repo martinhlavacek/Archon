@@ -2,11 +2,15 @@
 Knowledge Item Service
 
 Handles all knowledge item CRUD operations and data transformations.
+
+Supports both asyncpg (K8s) and Supabase (legacy) database backends.
 """
 
+import json
 from typing import Any
 
 from ...config.logfire_config import safe_logfire_error, safe_logfire_info
+from ..client_manager import get_database_mode, is_asyncpg_mode
 
 
 class KnowledgeItemService:
@@ -14,14 +18,25 @@ class KnowledgeItemService:
     Service for managing knowledge items including listing, filtering, updating, and deletion.
     """
 
-    def __init__(self, supabase_client):
+    def __init__(self, supabase_client=None):
         """
         Initialize the knowledge item service.
 
         Args:
-            supabase_client: The Supabase client for database operations
+            supabase_client: The Supabase client for database operations (legacy mode only)
         """
-        self.supabase = supabase_client
+        self._supabase_client = supabase_client
+        self._mode = get_database_mode()
+
+    @property
+    def supabase(self):
+        """Lazy load Supabase client for legacy mode."""
+        if self._mode != "supabase":
+            raise ValueError("Supabase client not available in asyncpg mode")
+        if self._supabase_client is None:
+            from src.server.utils import get_supabase_client
+            self._supabase_client = get_supabase_client()
+        return self._supabase_client
 
     async def list_items(
         self,
@@ -42,6 +57,163 @@ class KnowledgeItemService:
         Returns:
             Dict containing items, pagination info, and total count
         """
+        try:
+            if is_asyncpg_mode():
+                return await self._list_items_asyncpg(page, per_page, knowledge_type, search)
+            else:
+                return await self._list_items_supabase(page, per_page, knowledge_type, search)
+        except Exception as e:
+            safe_logfire_error(f"Failed to list knowledge items | error={str(e)}")
+            raise
+
+    async def _list_items_asyncpg(
+        self,
+        page: int,
+        per_page: int,
+        knowledge_type: str | None,
+        search: str | None,
+    ) -> dict[str, Any]:
+        """List items using asyncpg."""
+        from ..database import AsyncPGClient
+
+        # Build WHERE clauses
+        where_clauses = []
+        params = []
+        param_idx = 1
+
+        if knowledge_type:
+            where_clauses.append(f"metadata->>'knowledge_type' = ${param_idx}")
+            params.append(knowledge_type)
+            param_idx += 1
+
+        if search:
+            search_pattern = f"%{search}%"
+            where_clauses.append(
+                f"(title ILIKE ${param_idx} OR summary ILIKE ${param_idx} OR source_id ILIKE ${param_idx})"
+            )
+            params.append(search_pattern)
+            param_idx += 1
+
+        where_sql = " AND ".join(where_clauses) if where_clauses else "TRUE"
+
+        # Get total count
+        count_result = await AsyncPGClient.fetchval(
+            f"SELECT COUNT(*) FROM archon_sources WHERE {where_sql}",
+            *params
+        )
+        total = count_result or 0
+
+        # Apply pagination
+        offset = (page - 1) * per_page
+        params_with_pagination = params + [per_page, offset]
+
+        sources = await AsyncPGClient.fetch(
+            f"""
+            SELECT * FROM archon_sources
+            WHERE {where_sql}
+            ORDER BY updated_at DESC
+            LIMIT ${param_idx} OFFSET ${param_idx + 1}
+            """,
+            *params_with_pagination
+        )
+
+        # Convert rows to dicts
+        sources_list = [dict(row) for row in sources]
+
+        # Get source IDs
+        source_ids = [s["source_id"] for s in sources_list]
+
+        # Batch fetch related data
+        first_urls = {}
+        code_example_counts = {}
+        chunk_counts = {}
+
+        if source_ids:
+            # Get first URLs
+            urls_result = await AsyncPGClient.fetch(
+                """
+                SELECT source_id, url FROM archon_crawled_pages
+                WHERE source_id = ANY($1)
+                """,
+                source_ids
+            )
+            for row in urls_result:
+                if row["source_id"] not in first_urls:
+                    first_urls[row["source_id"]] = row["url"]
+
+            # Get code example counts
+            for source_id in source_ids:
+                count = await AsyncPGClient.fetchval(
+                    "SELECT COUNT(*) FROM archon_code_examples WHERE source_id = $1",
+                    source_id
+                )
+                code_example_counts[source_id] = count or 0
+                chunk_counts[source_id] = 0
+
+        # Transform sources to items
+        items = []
+        for source in sources_list:
+            source_id = source["source_id"]
+            source_metadata = source.get("metadata", {})
+            if isinstance(source_metadata, str):
+                source_metadata = json.loads(source_metadata)
+
+            source_url = source.get("source_url")
+            display_url = source_url if source_url else first_urls.get(source_id, f"source://{source_id}")
+
+            code_examples_count = code_example_counts.get(source_id, 0)
+            chunks_count = chunk_counts.get(source_id, 0)
+            source_type = self._determine_source_type(source_metadata, display_url)
+
+            item = {
+                "id": source_id,
+                "title": source.get("title", source.get("summary", "Untitled")),
+                "url": display_url,
+                "source_id": source_id,
+                "source_type": source_type,
+                "code_examples": [{"count": code_examples_count}] if code_examples_count > 0 else [],
+                "metadata": {
+                    "knowledge_type": source_metadata.get("knowledge_type", "technical"),
+                    "tags": source_metadata.get("tags", []),
+                    "source_type": source_type,
+                    "status": "active",
+                    "description": source_metadata.get("description", source.get("summary", "")),
+                    "chunks_count": chunks_count,
+                    "word_count": source.get("total_word_count", 0),
+                    "estimated_pages": round(source.get("total_word_count", 0) / 250, 1),
+                    "pages_tooltip": f"{round(source.get('total_word_count', 0) / 250, 1)} pages (≈ {source.get('total_word_count', 0):,} words)",
+                    "last_scraped": source.get("updated_at"),
+                    "file_name": source_metadata.get("file_name"),
+                    "file_type": source_metadata.get("file_type"),
+                    "update_frequency": source_metadata.get("update_frequency", 7),
+                    "code_examples_count": code_examples_count,
+                    **source_metadata,
+                },
+                "created_at": source.get("created_at"),
+                "updated_at": source.get("updated_at"),
+            }
+            items.append(item)
+
+        safe_logfire_info(
+            f"Knowledge items retrieved | total={total} | page={page} | filtered_count={len(items)}"
+        )
+
+        return {
+            "items": items,
+            "total": total,
+            "page": page,
+            "per_page": per_page,
+            "pages": (total + per_page - 1) // per_page,
+        }
+
+    async def _list_items_supabase(
+        self,
+        page: int,
+        per_page: int,
+        knowledge_type: str | None,
+        search: str | None,
+    ) -> dict[str, Any]:
+        """List items using Supabase (legacy)."""
         try:
             # Build the query with filters at database level for better performance
             query = self.supabase.from_("archon_sources").select("*")
@@ -212,27 +384,46 @@ class KnowledgeItemService:
         try:
             safe_logfire_info(f"Getting knowledge item | source_id={source_id}")
 
-            # Get the source record
-            result = (
-                self.supabase.from_("archon_sources")
-                .select("*")
-                .eq("source_id", source_id)
-                .single()
-                .execute()
-            )
-
-            if not result.data:
-                return None
-
-            # Transform the source to item format
-            item = await self._transform_source_to_item(result.data)
-            return item
+            if is_asyncpg_mode():
+                return await self._get_item_asyncpg(source_id)
+            else:
+                return await self._get_item_supabase(source_id)
 
         except Exception as e:
             safe_logfire_error(
                 f"Failed to get knowledge item | error={str(e)} | source_id={source_id}"
             )
             return None
+
+    async def _get_item_asyncpg(self, source_id: str) -> dict[str, Any] | None:
+        """Get item using asyncpg."""
+        from ..database import AsyncPGClient
+
+        row = await AsyncPGClient.fetchrow(
+            "SELECT * FROM archon_sources WHERE source_id = $1",
+            source_id
+        )
+
+        if not row:
+            return None
+
+        source = dict(row)
+        return await self._transform_source_to_item(source)
+
+    async def _get_item_supabase(self, source_id: str) -> dict[str, Any] | None:
+        """Get item using Supabase (legacy)."""
+        result = (
+            self.supabase.from_("archon_sources")
+            .select("*")
+            .eq("source_id", source_id)
+            .single()
+            .execute()
+        )
+
+        if not result.data:
+            return None
+
+        return await self._transform_source_to_item(result.data)
 
     async def update_item(
         self, source_id: str, updates: dict[str, Any]
@@ -252,63 +443,151 @@ class KnowledgeItemService:
                 f"Updating knowledge item | source_id={source_id} | updates={updates}"
             )
 
-            # Prepare update data
-            update_data = {}
-
-            # Handle title updates
-            if "title" in updates:
-                update_data["title"] = updates["title"]
-
-            # Handle metadata updates
-            metadata_fields = [
-                "description",
-                "knowledge_type",
-                "tags",
-                "status",
-                "update_frequency",
-                "group_name",
-            ]
-            metadata_updates = {k: v for k, v in updates.items() if k in metadata_fields}
-
-            if metadata_updates:
-                # Get current metadata
-                current_response = (
-                    self.supabase.table("archon_sources")
-                    .select("metadata")
-                    .eq("source_id", source_id)
-                    .execute()
-                )
-                if current_response.data:
-                    current_metadata = current_response.data[0].get("metadata", {})
-                    current_metadata.update(metadata_updates)
-                    update_data["metadata"] = current_metadata
-                else:
-                    update_data["metadata"] = metadata_updates
-
-            # Perform the update
-            result = (
-                self.supabase.table("archon_sources")
-                .update(update_data)
-                .eq("source_id", source_id)
-                .execute()
-            )
-
-            if result.data:
-                safe_logfire_info(f"Knowledge item updated successfully | source_id={source_id}")
-                return True, {
-                    "success": True,
-                    "message": f"Successfully updated knowledge item {source_id}",
-                    "source_id": source_id,
-                }
+            if is_asyncpg_mode():
+                return await self._update_item_asyncpg(source_id, updates)
             else:
-                safe_logfire_error(f"Knowledge item not found | source_id={source_id}")
-                return False, {"error": f"Knowledge item {source_id} not found"}
+                return await self._update_item_supabase(source_id, updates)
 
         except Exception as e:
             safe_logfire_error(
                 f"Failed to update knowledge item | error={str(e)} | source_id={source_id}"
             )
             return False, {"error": str(e)}
+
+    async def _update_item_asyncpg(
+        self, source_id: str, updates: dict[str, Any]
+    ) -> tuple[bool, dict[str, Any]]:
+        """Update item using asyncpg."""
+        from ..database import AsyncPGClient
+
+        # Prepare update data
+        update_data = {}
+
+        # Handle title updates
+        if "title" in updates:
+            update_data["title"] = updates["title"]
+
+        # Handle metadata updates
+        metadata_fields = [
+            "description",
+            "knowledge_type",
+            "tags",
+            "status",
+            "update_frequency",
+            "group_name",
+        ]
+        metadata_updates = {k: v for k, v in updates.items() if k in metadata_fields}
+
+        if metadata_updates:
+            # Get current metadata
+            current_row = await AsyncPGClient.fetchrow(
+                "SELECT metadata FROM archon_sources WHERE source_id = $1",
+                source_id
+            )
+            if current_row:
+                current_metadata = current_row["metadata"] or {}
+                if isinstance(current_metadata, str):
+                    current_metadata = json.loads(current_metadata)
+                current_metadata.update(metadata_updates)
+                update_data["metadata"] = current_metadata
+            else:
+                update_data["metadata"] = metadata_updates
+
+        if not update_data:
+            return False, {"error": "No update data provided"}
+
+        # Build SET clause dynamically
+        set_clauses = []
+        params = []
+        param_idx = 1
+
+        for field, value in update_data.items():
+            if field == "metadata":
+                set_clauses.append(f"{field} = ${param_idx}::jsonb")
+                params.append(json.dumps(value))
+            else:
+                set_clauses.append(f"{field} = ${param_idx}")
+                params.append(value)
+            param_idx += 1
+
+        params.append(source_id)
+
+        result = await AsyncPGClient.execute(
+            f"""
+            UPDATE archon_sources
+            SET {', '.join(set_clauses)}
+            WHERE source_id = ${param_idx}
+            """,
+            *params
+        )
+
+        # Check if any rows were affected
+        if result and "UPDATE" in result:
+            safe_logfire_info(f"Knowledge item updated successfully | source_id={source_id}")
+            return True, {
+                "success": True,
+                "message": f"Successfully updated knowledge item {source_id}",
+                "source_id": source_id,
+            }
+        else:
+            safe_logfire_error(f"Knowledge item not found | source_id={source_id}")
+            return False, {"error": f"Knowledge item {source_id} not found"}
+
+    async def _update_item_supabase(
+        self, source_id: str, updates: dict[str, Any]
+    ) -> tuple[bool, dict[str, Any]]:
+        """Update item using Supabase (legacy)."""
+        # Prepare update data
+        update_data = {}
+
+        # Handle title updates
+        if "title" in updates:
+            update_data["title"] = updates["title"]
+
+        # Handle metadata updates
+        metadata_fields = [
+            "description",
+            "knowledge_type",
+            "tags",
+            "status",
+            "update_frequency",
+            "group_name",
+        ]
+        metadata_updates = {k: v for k, v in updates.items() if k in metadata_fields}
+
+        if metadata_updates:
+            # Get current metadata
+            current_response = (
+                self.supabase.table("archon_sources")
+                .select("metadata")
+                .eq("source_id", source_id)
+                .execute()
+            )
+            if current_response.data:
+                current_metadata = current_response.data[0].get("metadata", {})
+                current_metadata.update(metadata_updates)
+                update_data["metadata"] = current_metadata
+            else:
+                update_data["metadata"] = metadata_updates
+
+        # Perform the update
+        result = (
+            self.supabase.table("archon_sources")
+            .update(update_data)
+            .eq("source_id", source_id)
+            .execute()
+        )
+
+        if result.data:
+            safe_logfire_info(f"Knowledge item updated successfully | source_id={source_id}")
+            return True, {
+                "success": True,
+                "message": f"Successfully updated knowledge item {source_id}",
+                "source_id": source_id,
+            }
+        else:
+            safe_logfire_error(f"Knowledge item not found | source_id={source_id}")
+            return False, {"error": f"Knowledge item {source_id} not found"}
 
     async def get_available_sources(self) -> dict[str, Any]:
         """
@@ -318,29 +597,62 @@ class KnowledgeItemService:
             Dict containing sources list and count
         """
         try:
-            # Query the sources table
-            result = self.supabase.from_("archon_sources").select("*").order("source_id").execute()
-
-            # Format the sources
-            sources = []
-            if result.data:
-                for source in result.data:
-                    sources.append({
-                        "source_id": source.get("source_id"),
-                        "title": source.get("title", source.get("summary", "Untitled")),
-                        "summary": source.get("summary"),
-                        "metadata": source.get("metadata", {}),
-                        "total_words": source.get("total_words", source.get("total_word_count", 0)),
-                        "update_frequency": source.get("update_frequency", 7),
-                        "created_at": source.get("created_at"),
-                        "updated_at": source.get("updated_at", source.get("created_at")),
-                    })
-
-            return {"success": True, "sources": sources, "count": len(sources)}
+            if is_asyncpg_mode():
+                return await self._get_available_sources_asyncpg()
+            else:
+                return await self._get_available_sources_supabase()
 
         except Exception as e:
             safe_logfire_error(f"Failed to get available sources | error={str(e)}")
             return {"success": False, "error": str(e), "sources": [], "count": 0}
+
+    async def _get_available_sources_asyncpg(self) -> dict[str, Any]:
+        """Get available sources using asyncpg."""
+        from ..database import AsyncPGClient
+
+        rows = await AsyncPGClient.fetch(
+            "SELECT * FROM archon_sources ORDER BY source_id"
+        )
+
+        sources = []
+        for row in rows:
+            source = dict(row)
+            metadata = source.get("metadata", {})
+            if isinstance(metadata, str):
+                metadata = json.loads(metadata)
+
+            sources.append({
+                "source_id": source.get("source_id"),
+                "title": source.get("title", source.get("summary", "Untitled")),
+                "summary": source.get("summary"),
+                "metadata": metadata,
+                "total_words": source.get("total_words", source.get("total_word_count", 0)),
+                "update_frequency": source.get("update_frequency", 7),
+                "created_at": str(source.get("created_at")) if source.get("created_at") else None,
+                "updated_at": str(source.get("updated_at", source.get("created_at"))) if source.get("updated_at") or source.get("created_at") else None,
+            })
+
+        return {"success": True, "sources": sources, "count": len(sources)}
+
+    async def _get_available_sources_supabase(self) -> dict[str, Any]:
+        """Get available sources using Supabase (legacy)."""
+        result = self.supabase.from_("archon_sources").select("*").order("source_id").execute()
+
+        sources = []
+        if result.data:
+            for source in result.data:
+                sources.append({
+                    "source_id": source.get("source_id"),
+                    "title": source.get("title", source.get("summary", "Untitled")),
+                    "summary": source.get("summary"),
+                    "metadata": source.get("metadata", {}),
+                    "total_words": source.get("total_words", source.get("total_word_count", 0)),
+                    "update_frequency": source.get("update_frequency", 7),
+                    "created_at": source.get("created_at"),
+                    "updated_at": source.get("updated_at", source.get("created_at")),
+                })
+
+        return {"success": True, "sources": sources, "count": len(sources)}
 
     async def _get_all_sources(self) -> list[dict[str, Any]]:
         """Get all sources from the database."""
@@ -358,6 +670,9 @@ class KnowledgeItemService:
             Transformed knowledge item
         """
         source_metadata = source.get("metadata", {})
+        # Handle asyncpg returning JSONB as string
+        if isinstance(source_metadata, str):
+            source_metadata = json.loads(source_metadata)
         source_id = source["source_id"]
 
         # Get first page URL
@@ -402,16 +717,25 @@ class KnowledgeItemService:
     async def _get_first_page_url(self, source_id: str) -> str:
         """Get the first page URL for a source."""
         try:
-            pages_response = (
-                self.supabase.from_("archon_crawled_pages")
-                .select("url")
-                .eq("source_id", source_id)
-                .limit(1)
-                .execute()
-            )
+            if is_asyncpg_mode():
+                from ..database import AsyncPGClient
+                row = await AsyncPGClient.fetchrow(
+                    "SELECT url FROM archon_crawled_pages WHERE source_id = $1 LIMIT 1",
+                    source_id
+                )
+                if row:
+                    return row["url"] or f"source://{source_id}"
+            else:
+                pages_response = (
+                    self.supabase.from_("archon_crawled_pages")
+                    .select("url")
+                    .eq("source_id", source_id)
+                    .limit(1)
+                    .execute()
+                )
 
-            if pages_response.data:
-                return pages_response.data[0].get("url", f"source://{source_id}")
+                if pages_response.data:
+                    return pages_response.data[0].get("url", f"source://{source_id}")
 
         except Exception:
             pass
@@ -421,14 +745,29 @@ class KnowledgeItemService:
     async def _get_code_examples(self, source_id: str) -> list[dict[str, Any]]:
         """Get code examples for a source."""
         try:
-            code_examples_response = (
-                self.supabase.from_("archon_code_examples")
-                .select("id, content, summary, metadata")
-                .eq("source_id", source_id)
-                .execute()
-            )
+            if is_asyncpg_mode():
+                from ..database import AsyncPGClient
+                rows = await AsyncPGClient.fetch(
+                    "SELECT id, content, summary, metadata FROM archon_code_examples WHERE source_id = $1",
+                    source_id
+                )
+                results = []
+                for row in rows:
+                    result = dict(row)
+                    result["id"] = str(result["id"])
+                    if isinstance(result.get("metadata"), str):
+                        result["metadata"] = json.loads(result["metadata"])
+                    results.append(result)
+                return results
+            else:
+                code_examples_response = (
+                    self.supabase.from_("archon_code_examples")
+                    .select("id, content, summary, metadata")
+                    .eq("source_id", source_id)
+                    .execute()
+                )
 
-            return code_examples_response.data if code_examples_response.data else []
+                return code_examples_response.data if code_examples_response.data else []
 
         except Exception:
             return []
@@ -462,16 +801,24 @@ class KnowledgeItemService:
     async def _get_chunks_count(self, source_id: str) -> int:
         """Get the actual number of chunks for a source."""
         try:
-            # Count the actual rows in crawled_pages for this source
-            result = (
-                self.supabase.table("archon_crawled_pages")
-                .select("*", count="exact")
-                .eq("source_id", source_id)
-                .execute()
-            )
+            if is_asyncpg_mode():
+                from ..database import AsyncPGClient
+                count = await AsyncPGClient.fetchval(
+                    "SELECT COUNT(*) FROM archon_crawled_pages WHERE source_id = $1",
+                    source_id
+                )
+                return count or 0
+            else:
+                # Count the actual rows in crawled_pages for this source
+                result = (
+                    self.supabase.table("archon_crawled_pages")
+                    .select("*", count="exact")
+                    .eq("source_id", source_id)
+                    .execute()
+                )
 
-            # Return the count of pages (chunks)
-            return result.count if result.count else 0
+                # Return the count of pages (chunks)
+                return result.count if result.count else 0
 
         except Exception as e:
             # If we can't get chunk count, return 0

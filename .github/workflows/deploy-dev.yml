@@ -1,0 +1,300 @@
+name: Deploy Dev (Auto)
+
+# Auto-deploys to k3d development environment on push to main branch.
+# Builds Docker images with :dev and :dev-<sha> tags that ArgoCD Image Updater will detect.
+#
+# Components:
+# - archon-api (FastAPI server)
+# - archon-ui (React frontend)
+# - archon-mcp (MCP protocol server)
+#
+# Also runs validation (tests) on PRs to main.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'python/**'
+      - 'archon-ui-main/**'
+      - '.github/workflows/deploy-dev.yml'
+  pull_request:
+    branches: [main]
+    paths:
+      - 'python/**'
+      - 'archon-ui-main/**'
+
+env:
+  REGISTRY: ghcr.io
+  ARCHON_API_IMAGE: ghcr.io/${{ github.repository_owner }}/archon-api
+  ARCHON_UI_IMAGE: ghcr.io/${{ github.repository_owner }}/archon-ui
+  ARCHON_MCP_IMAGE: ghcr.io/${{ github.repository_owner }}/archon-mcp
+  PYTHON_VERSION: '3.12'
+  NODE_VERSION: '18'
+
+jobs:
+  detect-changes:
+    runs-on: ubuntu-latest
+    outputs:
+      api_affected: ${{ steps.affected.outputs.api_affected }}
+      ui_affected: ${{ steps.affected.outputs.ui_affected }}
+      mcp_affected: ${{ steps.affected.outputs.mcp_affected }}
+      short_sha: ${{ steps.sha.outputs.short_sha }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 10
+
+      - name: Get short SHA
+        id: sha
+        run: |
+          SHORT_SHA=$(echo "${{ github.sha }}" | cut -c1-7)
+          echo "short_sha=$SHORT_SHA" >> $GITHUB_OUTPUT
+          echo "Short SHA: $SHORT_SHA"
+
+      - name: Check affected components
+        id: affected
+        run: |
+          echo "Checking for changes since last commit..."
+
+          # Check API affected (python/src/server/)
+          API_AFFECTED=false
+          API_COMMITS=$(git log HEAD~1..HEAD --oneline -- \
+            'python/src/server/' \
+            'python/src/config/' \
+            'python/pyproject.toml' \
+            'python/Dockerfile.server' \
+            2>/dev/null || echo "")
+
+          if [ -n "$API_COMMITS" ]; then
+            API_AFFECTED=true
+            echo "archon-api is affected"
+            echo "$API_COMMITS"
+          fi
+
+          # Check UI affected
+          UI_AFFECTED=false
+          UI_COMMITS=$(git log HEAD~1..HEAD --oneline -- \
+            'archon-ui-main/' \
+            2>/dev/null || echo "")
+
+          if [ -n "$UI_COMMITS" ]; then
+            UI_AFFECTED=true
+            echo "archon-ui is affected"
+            echo "$UI_COMMITS"
+          fi
+
+          # Check MCP affected (python/src/mcp/)
+          MCP_AFFECTED=false
+          MCP_COMMITS=$(git log HEAD~1..HEAD --oneline -- \
+            'python/src/mcp/' \
+            'python/src/config/' \
+            'python/pyproject.toml' \
+            'python/Dockerfile.mcp' \
+            2>/dev/null || echo "")
+
+          if [ -n "$MCP_COMMITS" ]; then
+            MCP_AFFECTED=true
+            echo "archon-mcp is affected"
+            echo "$MCP_COMMITS"
+          fi
+
+          echo "api_affected=$API_AFFECTED" >> $GITHUB_OUTPUT
+          echo "ui_affected=$UI_AFFECTED" >> $GITHUB_OUTPUT
+          echo "mcp_affected=$MCP_AFFECTED" >> $GITHUB_OUTPUT
+
+          echo ""
+          echo "=== Affected Summary ==="
+          echo "archon-api: $API_AFFECTED"
+          echo "archon-ui: $UI_AFFECTED"
+          echo "archon-mcp: $MCP_AFFECTED"
+
+  # Run backend tests if API or MCP affected
+  test-backend:
+    needs: [detect-changes]
+    runs-on: ubuntu-latest
+    if: |
+      needs.detect-changes.outputs.api_affected == 'true' ||
+      needs.detect-changes.outputs.mcp_affected == 'true'
+    defaults:
+      run:
+        working-directory: ./python
+    env:
+      SUPABASE_URL: 'https://xyzcompanytest.supabase.co'
+      SUPABASE_SERVICE_KEY: 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZS1kZW1vIiwicm9sZSI6InNlcnZpY2Vfcm9sZSIsImV4cCI6MTk4MzgxMjk5Nn0.EGIM96RAZx35lJzdJsyH-qQwv8Hdp7fsn3W0YpN81IU'
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v4
+        with:
+          version: "latest"
+
+      - name: Set up Python
+        run: uv python install ${{ env.PYTHON_VERSION }}
+
+      - name: Install dependencies
+        run: uv sync --group all --group dev
+
+      - name: Run tests
+        run: |
+          uv run pytest tests/ --verbose --tb=short \
+            --ignore=tests/agent_work_orders \
+            -x
+
+  # Run frontend tests if UI affected
+  test-frontend:
+    needs: [detect-changes]
+    runs-on: ubuntu-latest
+    if: needs.detect-changes.outputs.ui_affected == 'true'
+    defaults:
+      run:
+        working-directory: ./archon-ui-main
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: 'npm'
+          cache-dependency-path: archon-ui-main/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      # Frontend tests are currently disabled in Archon
+      # - name: Run tests
+      #   run: npm run test
+
+  # Build and push Archon API
+  build-api:
+    needs: [detect-changes, test-backend]
+    runs-on: ubuntu-latest
+    if: github.event_name == 'push' && needs.detect-changes.outputs.api_affected == 'true'
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push Archon API
+        uses: docker/build-push-action@v5
+        with:
+          context: ./python
+          file: ./python/Dockerfile.server
+          push: true
+          tags: |
+            ${{ env.ARCHON_API_IMAGE }}:dev
+            ${{ env.ARCHON_API_IMAGE }}:dev-${{ needs.detect-changes.outputs.short_sha }}
+          build-args: |
+            ARCHON_SERVER_PORT=8181
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  # Build and push Archon UI
+  build-ui:
+    needs: [detect-changes, test-frontend]
+    runs-on: ubuntu-latest
+    if: github.event_name == 'push' && needs.detect-changes.outputs.ui_affected == 'true'
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push Archon UI
+        uses: docker/build-push-action@v5
+        with:
+          context: ./archon-ui-main
+          file: ./archon-ui-main/Dockerfile.prod
+          push: true
+          tags: |
+            ${{ env.ARCHON_UI_IMAGE }}:dev
+            ${{ env.ARCHON_UI_IMAGE }}:dev-${{ needs.detect-changes.outputs.short_sha }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  # Build and push Archon MCP
+  build-mcp:
+    needs: [detect-changes, test-backend]
+    runs-on: ubuntu-latest
+    if: github.event_name == 'push' && needs.detect-changes.outputs.mcp_affected == 'true'
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push Archon MCP
+        uses: docker/build-push-action@v5
+        with:
+          context: ./python
+          file: ./python/Dockerfile.mcp
+          push: true
+          tags: |
+            ${{ env.ARCHON_MCP_IMAGE }}:dev
+            ${{ env.ARCHON_MCP_IMAGE }}:dev-${{ needs.detect-changes.outputs.short_sha }}
+          build-args: |
+            ARCHON_MCP_PORT=8051
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  # Summary
+  summary:
+    needs: [detect-changes, test-backend, test-frontend, build-api, build-ui, build-mcp]
+    runs-on: ubuntu-latest
+    if: always() && github.event_name == 'push'
+    steps:
+      - name: Summary
+        run: |
+          SHORT_SHA="${{ needs.detect-changes.outputs.short_sha }}"
+          echo "## Dev Deployment (k3d)" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "Version: \`dev-$SHORT_SHA\`" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### Build Results" >> $GITHUB_STEP_SUMMARY
+          echo "| Component | Affected | Build Status |" >> $GITHUB_STEP_SUMMARY
+          echo "|-----------|----------|--------------|" >> $GITHUB_STEP_SUMMARY
+          echo "| archon-api | ${{ needs.detect-changes.outputs.api_affected }} | ${{ needs.build-api.result || 'skipped' }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| archon-ui | ${{ needs.detect-changes.outputs.ui_affected }} | ${{ needs.build-ui.result || 'skipped' }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| archon-mcp | ${{ needs.detect-changes.outputs.mcp_affected }} | ${{ needs.build-mcp.result || 'skipped' }} |" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "Images pushed with \`:dev\` and \`:dev-$SHORT_SHA\` tags." >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Commit:** ${{ github.sha }}" >> $GITHUB_STEP_SUMMARY

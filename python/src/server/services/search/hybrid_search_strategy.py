@@ -2,20 +2,22 @@
 Hybrid Search Strategy
 
 Implements hybrid search combining vector similarity search with full-text search
-using PostgreSQL's ts_vector for improved recall and precision in document and 
+using PostgreSQL's ts_vector for improved recall and precision in document and
 code example retrieval.
 
 Strategy combines:
 1. Vector/semantic search for conceptual matches
 2. Full-text search using ts_vector for efficient keyword matching
 3. Returns union of both result sets for maximum coverage
+
+Supports both asyncpg (K8s) and Supabase (legacy) database backends.
 """
 
+import json
 from typing import Any
 
-from supabase import Client
-
 from ...config.logfire_config import get_logger, safe_span
+from ..client_manager import get_database_mode, is_asyncpg_mode
 from ..embeddings.embedding_service import create_embedding
 
 logger = get_logger(__name__)
@@ -24,9 +26,21 @@ logger = get_logger(__name__)
 class HybridSearchStrategy:
     """Strategy class implementing hybrid search combining vector and full-text search"""
 
-    def __init__(self, supabase_client: Client, base_strategy):
-        self.supabase_client = supabase_client
+    def __init__(self, supabase_client=None, base_strategy=None):
+        """Initialize with optional database client (legacy mode only)"""
+        self._supabase_client = supabase_client
         self.base_strategy = base_strategy
+        self._mode = get_database_mode()
+
+    @property
+    def supabase_client(self):
+        """Lazy load Supabase client for legacy mode."""
+        if self._mode != "supabase":
+            raise ValueError("Supabase client not available in asyncpg mode")
+        if self._supabase_client is None:
+            from src.server.utils import get_supabase_client
+            self._supabase_client = get_supabase_client()
+        return self._supabase_client
 
     async def search_documents_hybrid(
         self,
@@ -36,7 +50,7 @@ class HybridSearchStrategy:
         filter_metadata: dict | None = None,
     ) -> list[dict[str, Any]]:
         """
-        Perform hybrid search on archon_crawled_pages table using the PostgreSQL 
+        Perform hybrid search on archon_crawled_pages table using the PostgreSQL
         hybrid search function that combines vector and full-text search.
 
         Args:
@@ -50,40 +64,14 @@ class HybridSearchStrategy:
         """
         with safe_span("hybrid_search_documents") as span:
             try:
-                # Prepare filter and source parameters
-                filter_json = filter_metadata or {}
-                source_filter = filter_json.pop("source", None) if "source" in filter_json else None
-
-                # Call the hybrid search PostgreSQL function
-                response = self.supabase_client.rpc(
-                    "hybrid_search_archon_crawled_pages",
-                    {
-                        "query_embedding": query_embedding,
-                        "query_text": query,
-                        "match_count": match_count,
-                        "filter": filter_json,
-                        "source_filter": source_filter,
-                    },
-                ).execute()
-
-                if not response.data:
-                    logger.debug("No results from hybrid search")
-                    return []
-
-                # Format results to match expected structure
-                results = []
-                for row in response.data:
-                    result = {
-                        "id": row["id"],
-                        "url": row["url"],
-                        "chunk_number": row["chunk_number"],
-                        "content": row["content"],
-                        "metadata": row["metadata"],
-                        "source_id": row["source_id"],
-                        "similarity": row["similarity"],
-                        "match_type": row["match_type"],
-                    }
-                    results.append(result)
+                if is_asyncpg_mode():
+                    results = await self._search_documents_hybrid_asyncpg(
+                        query, query_embedding, match_count, filter_metadata
+                    )
+                else:
+                    results = self._search_documents_hybrid_supabase(
+                        query, query_embedding, match_count, filter_metadata
+                    )
 
                 span.set_attribute("results_count", len(results))
 
@@ -105,6 +93,97 @@ class HybridSearchStrategy:
                 span.set_attribute("error", str(e))
                 return []
 
+    async def _search_documents_hybrid_asyncpg(
+        self,
+        query: str,
+        query_embedding: list[float],
+        match_count: int,
+        filter_metadata: dict | None,
+    ) -> list[dict[str, Any]]:
+        """Perform hybrid document search using asyncpg."""
+        from ..database import AsyncPGClient
+
+        # Prepare filter and source parameters
+        filter_json = dict(filter_metadata) if filter_metadata else {}
+        source_filter = filter_json.pop("source", None) if "source" in filter_json else None
+
+        # Format embedding for PostgreSQL
+        embedding_str = "[" + ",".join(str(x) for x in query_embedding) + "]"
+
+        rows = await AsyncPGClient.fetch(
+            """
+            SELECT * FROM hybrid_search_archon_crawled_pages(
+                query_embedding := $1::vector,
+                query_text := $2,
+                match_count := $3,
+                filter := $4::jsonb,
+                source_filter := $5
+            )
+            """,
+            embedding_str, query, match_count, json.dumps(filter_json), source_filter
+        )
+
+        results = []
+        for row in rows:
+            result = {
+                "id": str(row["id"]),
+                "url": row["url"],
+                "chunk_number": row["chunk_number"],
+                "content": row["content"],
+                "metadata": row["metadata"],
+                "source_id": str(row["source_id"]) if row["source_id"] else None,
+                "similarity": row["similarity"],
+                "match_type": row["match_type"],
+            }
+            results.append(result)
+
+        return results
+
+    def _search_documents_hybrid_supabase(
+        self,
+        query: str,
+        query_embedding: list[float],
+        match_count: int,
+        filter_metadata: dict | None,
+    ) -> list[dict[str, Any]]:
+        """Perform hybrid document search using Supabase (legacy)."""
+        # Prepare filter and source parameters
+        filter_json = dict(filter_metadata) if filter_metadata else {}
+        source_filter = filter_json.pop("source", None) if "source" in filter_json else None
+
+        # Call the hybrid search PostgreSQL function
+        response = self.supabase_client.rpc(
+            "hybrid_search_archon_crawled_pages",
+            {
+                "query_embedding": query_embedding,
+                "query_text": query,
+                "match_count": match_count,
+                "filter": filter_json,
+                "source_filter": source_filter,
+            },
+        ).execute()
+
+        if not response.data:
+            logger.debug("No results from hybrid search")
+            return []
+
+        # Format results to match expected structure
+        results = []
+        for row in response.data:
+            result = {
+                "id": row["id"],
+                "url": row["url"],
+                "chunk_number": row["chunk_number"],
+                "content": row["content"],
+                "metadata": row["metadata"],
+                "source_id": row["source_id"],
+                "similarity": row["similarity"],
+                "match_type": row["match_type"],
+            }
+            results.append(result)
+
+        return results
+
     async def search_code_examples_hybrid(
         self,
         query: str,
@@ -113,7 +192,7 @@ class HybridSearchStrategy:
         source_id: str | None = None,
     ) -> list[dict[str, Any]]:
         """
-        Perform hybrid search on archon_code_examples table using the PostgreSQL 
+        Perform hybrid search on archon_code_examples table using the PostgreSQL
         hybrid search function that combines vector and full-text search.
 
         Args:
@@ -134,44 +213,14 @@ class HybridSearchStrategy:
                     logger.error("Failed to create embedding for code example query")
                     return []
 
-                # Prepare filter and source parameters
-                filter_json = filter_metadata or {}
-                # Use source_id parameter if provided, otherwise check filter_metadata
-                final_source_filter = source_id
-                if not final_source_filter and "source" in filter_json:
-                    final_source_filter = filter_json.pop("source")
-
-                # Call the hybrid search PostgreSQL function
-                response = self.supabase_client.rpc(
-                    "hybrid_search_archon_code_examples",
-                    {
-                        "query_embedding": query_embedding,
-                        "query_text": query,
-                        "match_count": match_count,
-                        "filter": filter_json,
-                        "source_filter": final_source_filter,
-                    },
-                ).execute()
-
-                if not response.data:
-                    logger.debug("No results from hybrid code search")
-                    return []
-
-                # Format results to match expected structure
-                results = []
-                for row in response.data:
-                    result = {
-                        "id": row["id"],
-                        "url": row["url"],
-                        "chunk_number": row["chunk_number"],
-                        "content": row["content"],
-                        "summary": row["summary"],
-                        "metadata": row["metadata"],
-                        "source_id": row["source_id"],
-                        "similarity": row["similarity"],
-                        "match_type": row["match_type"],
-                    }
-                    results.append(result)
+                if is_asyncpg_mode():
+                    results = await self._search_code_examples_hybrid_asyncpg(
+                        query, query_embedding, match_count, filter_metadata, source_id
+                    )
+                else:
+                    results = self._search_code_examples_hybrid_supabase(
+                        query, query_embedding, match_count, filter_metadata, source_id
+                    )
 
                 span.set_attribute("results_count", len(results))
 
@@ -192,3 +241,102 @@ class HybridSearchStrategy:
                 logger.error(f"Hybrid code example search failed: {e}")
                 span.set_attribute("error", str(e))
                 return []
+
+    async def _search_code_examples_hybrid_asyncpg(
+        self,
+        query: str,
+        query_embedding: list[float],
+        match_count: int,
+        filter_metadata: dict | None,
+        source_id: str | None,
+    ) -> list[dict[str, Any]]:
+        """Perform hybrid code examples search using asyncpg."""
+        from ..database import AsyncPGClient
+
+        # Prepare filter and source parameters
+        filter_json = dict(filter_metadata) if filter_metadata else {}
+        final_source_filter = source_id
+        if not final_source_filter and "source" in filter_json:
+            final_source_filter = filter_json.pop("source")
+
+        # Format embedding for PostgreSQL
+        embedding_str = "[" + ",".join(str(x) for x in query_embedding) + "]"
+
+        rows = await AsyncPGClient.fetch(
+            """
+            SELECT * FROM hybrid_search_archon_code_examples(
+                query_embedding := $1::vector,
+                query_text := $2,
+                match_count := $3,
+                filter := $4::jsonb,
+                source_filter := $5
+            )
+            """,
+            embedding_str, query, match_count, json.dumps(filter_json), final_source_filter
+        )
+
+        results = []
+        for row in rows:
+            result = {
+                "id": str(row["id"]),
+                "url": row["url"],
+                "chunk_number": row["chunk_number"],
+                "content": row["content"],
+                "summary": row["summary"],
+                "metadata": row["metadata"],
+                "source_id": str(row["source_id"]) if row["source_id"] else None,
+                "similarity": row["similarity"],
+                "match_type": row["match_type"],
+            }
+            results.append(result)
+
+        return results
+
+    def _search_code_examples_hybrid_supabase(
+        self,
+        query: str,
+        query_embedding: list[float],
+        match_count: int,
+        filter_metadata: dict | None,
+        source_id: str | None,
+    ) -> list[dict[str, Any]]:
+        """Perform hybrid code examples search using Supabase (legacy)."""
+        # Prepare filter and source parameters
+        filter_json = dict(filter_metadata) if filter_metadata else {}
+        final_source_filter = source_id
+        if not final_source_filter and "source" in filter_json:
+            final_source_filter = filter_json.pop("source")
+
+        # Call the hybrid search PostgreSQL function
+        response = self.supabase_client.rpc(
+            "hybrid_search_archon_code_examples",
+            {
+                "query_embedding": query_embedding,
+                "query_text": query,
+                "match_count": match_count,
+                "filter": filter_json,
+                "source_filter": final_source_filter,
+            },
+        ).execute()
+
+        if not response.data:
+            logger.debug("No results from hybrid code search")
+            return []
+
+        # Format results to match expected structure
+        results = []
+        for row in response.data:
+            result = {
+                "id": row["id"],
+                "url": row["url"],
+                "chunk_number": row["chunk_number"],
+                "content": row["content"],
+                "summary": row["summary"],
+                "metadata": row["metadata"],
+                "source_id": row["source_id"],
+                "similarity": row["similarity"],
+                "match_type": row["match_type"],
+            }
+            results.append(result)
+
+        return results

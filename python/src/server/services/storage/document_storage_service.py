@@ -1,14 +1,18 @@
 """
 Document Storage Service
 
-Handles storage of documents in Supabase with parallel processing support.
+Handles storage of documents in the database with parallel processing support.
+
+Supports both asyncpg (K8s) and Supabase (legacy) database backends.
 """
 
 import asyncio
+import json
 import os
 from typing import Any
 
 from ...config.logfire_config import safe_span, search_logger
+from ..client_manager import get_database_mode, is_asyncpg_mode
 from ..embeddings.contextual_embedding_service import generate_contextual_embeddings_batch
 from ..embeddings.embedding_service import create_embeddings_batch
 
@@ -101,7 +105,14 @@ async def add_documents_to_supabase(
                             raise
 
                     batch_urls = unique_urls[i : i + delete_batch_size]
-                    client.table("archon_crawled_pages").delete().in_("url", batch_urls).execute()
+                    if is_asyncpg_mode():
+                        from ..database import AsyncPGClient
+                        await AsyncPGClient.execute(
+                            "DELETE FROM archon_crawled_pages WHERE url = ANY($1)",
+                            batch_urls
+                        )
+                    else:
+                        client.table("archon_crawled_pages").delete().in_("url", batch_urls).execute()
                     # Yield control to allow other async operations
                     if i + delete_batch_size < len(unique_urls):
                         await asyncio.sleep(0.05)  # Reduced pause between delete batches
@@ -131,7 +142,14 @@ async def add_documents_to_supabase(
 
                 batch_urls = unique_urls[i : i + fallback_batch_size]
                 try:
-                    client.table("archon_crawled_pages").delete().in_("url", batch_urls).execute()
+                    if is_asyncpg_mode():
+                        from ..database import AsyncPGClient
+                        await AsyncPGClient.execute(
+                            "DELETE FROM archon_crawled_pages WHERE url = ANY($1)",
+                            batch_urls
+                        )
+                    else:
+                        client.table("archon_crawled_pages").delete().in_("url", batch_urls).execute()
                     await asyncio.sleep(0.05)  # Rate limit to prevent overwhelming
                 except Exception as inner_e:
                     search_logger.error(
@@ -439,7 +457,45 @@ async def add_documents_to_supabase(
                         raise
 
                 try:
-                    client.table("archon_crawled_pages").insert(batch_data).execute()
+                    if is_asyncpg_mode():
+                        # asyncpg mode - insert records individually with parameterized queries
+                        from ..database import AsyncPGClient
+                        for record in batch_data:
+                            # Determine which embedding column to use
+                            embedding_col = None
+                            embedding_val = None
+                            for col in ["embedding_768", "embedding_1024", "embedding_1536", "embedding_3072"]:
+                                if col in record:
+                                    embedding_col = col
+                                    # Convert embedding list to pgvector string format
+                                    embedding_list = record[col]
+                                    if isinstance(embedding_list, list):
+                                        embedding_val = "[" + ",".join(str(x) for x in embedding_list) + "]"
+                                    else:
+                                        embedding_val = embedding_list
+                                    break
+
+                            await AsyncPGClient.execute(
+                                f"""
+                                INSERT INTO archon_crawled_pages
+                                (url, chunk_number, content, metadata, source_id,
+                                 {embedding_col}, llm_chat_model, embedding_model, embedding_dimension, page_id)
+                                VALUES ($1, $2, $3, $4::jsonb, $5, $6::vector, $7, $8, $9, $10)
+                                """,
+                                record["url"],
+                                record["chunk_number"],
+                                record["content"],
+                                json.dumps(record["metadata"]),
+                                record["source_id"],
+                                embedding_val,
+                                record.get("llm_chat_model"),
+                                record.get("embedding_model"),
+                                record.get("embedding_dimension"),
+                                record.get("page_id"),
+                            )
+                    else:
+                        # Supabase mode - batch insert
+                        client.table("archon_crawled_pages").insert(batch_data).execute()
                     total_chunks_stored += len(batch_data)
 
                     # Increment completed batches and report simple progress
@@ -497,7 +553,42 @@ async def add_documents_to_supabase(
                                     raise
 
                             try:
-                                client.table("archon_crawled_pages").insert(record).execute()
+                                if is_asyncpg_mode():
+                                    from ..database import AsyncPGClient
+                                    # Determine which embedding column to use
+                                    embedding_col = None
+                                    embedding_val = None
+                                    for col in ["embedding_768", "embedding_1024", "embedding_1536", "embedding_3072"]:
+                                        if col in record:
+                                            embedding_col = col
+                                            # Convert embedding list to pgvector string format
+                                            embedding_list = record[col]
+                                            if isinstance(embedding_list, list):
+                                                embedding_val = "[" + ",".join(str(x) for x in embedding_list) + "]"
+                                            else:
+                                                embedding_val = embedding_list
+                                            break
+
+                                    await AsyncPGClient.execute(
+                                        f"""
+                                        INSERT INTO archon_crawled_pages
+                                        (url, chunk_number, content, metadata, source_id,
+                                         {embedding_col}, llm_chat_model, embedding_model, embedding_dimension, page_id)
+                                        VALUES ($1, $2, $3, $4::jsonb, $5, $6::vector, $7, $8, $9, $10)
+                                        """,
+                                        record["url"],
+                                        record["chunk_number"],
+                                        record["content"],
+                                        json.dumps(record["metadata"]),
+                                        record["source_id"],
+                                        embedding_val,
+                                        record.get("llm_chat_model"),
+                                        record.get("embedding_model"),
+                                        record.get("embedding_dimension"),
+                                        record.get("page_id"),
+                                    )
+                                else:
+                                    client.table("archon_crawled_pages").insert(record).execute()
                                 successful_inserts += 1
                                 total_chunks_stored += 1
                             except Exception as individual_error:

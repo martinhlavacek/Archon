@@ -3,9 +3,12 @@ Credential management service for Archon backend
 
 Handles loading, storing, and accessing credentials with encryption for sensitive values.
 Credentials include API keys, service credentials, and application configuration.
+
+Supports both asyncpg (K8s) and Supabase (legacy) database backends.
 """
 
 import base64
+import json
 import os
 import re
 import time
@@ -20,6 +23,7 @@ from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
 from supabase import Client, create_client
 
 from ..config.logfire_config import get_logger
+from .client_manager import is_asyncpg_mode
 
 logger = get_logger(__name__)
 
@@ -126,36 +130,70 @@ class CredentialService:
     async def load_all_credentials(self) -> dict[str, Any]:
         """Load all credentials from database and cache them."""
         try:
-            supabase = self._get_supabase_client()
-
-            # Fetch all credentials
-            result = supabase.table("archon_settings").select("*").execute()
-
-            credentials = {}
-            for item in result.data:
-                key = item["key"]
-                if item["is_encrypted"] and item["encrypted_value"]:
-                    # For encrypted values, we store the encrypted version
-                    # Decryption happens when the value is actually needed
-                    credentials[key] = {
-                        "encrypted_value": item["encrypted_value"],
-                        "is_encrypted": True,
-                        "category": item["category"],
-                        "description": item["description"],
-                    }
-                else:
-                    # Plain text values
-                    credentials[key] = item["value"]
-
-            self._cache = credentials
-            self._cache_initialized = True
-            logger.info(f"Loaded {len(credentials)} credentials from database")
-
-            return credentials
+            if is_asyncpg_mode():
+                return await self._load_all_credentials_asyncpg()
+            else:
+                return await self._load_all_credentials_supabase()
 
         except Exception as e:
             logger.error(f"Error loading credentials: {e}")
             raise
+
+    async def _load_all_credentials_asyncpg(self) -> dict[str, Any]:
+        """Load all credentials using asyncpg."""
+        from .database import AsyncPGClient
+
+        rows = await AsyncPGClient.fetch(
+            "SELECT key, value, encrypted_value, is_encrypted, category, description FROM archon_settings"
+        )
+
+        credentials = {}
+        for item in rows:
+            key = item["key"]
+            if item["is_encrypted"] and item["encrypted_value"]:
+                credentials[key] = {
+                    "encrypted_value": item["encrypted_value"],
+                    "is_encrypted": True,
+                    "category": item["category"],
+                    "description": item["description"],
+                }
+            else:
+                credentials[key] = item["value"]
+
+        self._cache = credentials
+        self._cache_initialized = True
+        logger.info(f"Loaded {len(credentials)} credentials from database (asyncpg)")
+
+        return credentials
+
+    async def _load_all_credentials_supabase(self) -> dict[str, Any]:
+        """Load all credentials using Supabase (legacy)."""
+        supabase = self._get_supabase_client()
+
+        # Fetch all credentials
+        result = supabase.table("archon_settings").select("*").execute()
+
+        credentials = {}
+        for item in result.data:
+            key = item["key"]
+            if item["is_encrypted"] and item["encrypted_value"]:
+                # For encrypted values, we store the encrypted version
+                # Decryption happens when the value is actually needed
+                credentials[key] = {
+                    "encrypted_value": item["encrypted_value"],
+                    "is_encrypted": True,
+                    "category": item["category"],
+                    "description": item["description"],
+                }
+            else:
+                # Plain text values
+                credentials[key] = item["value"]
+
+        self._cache = credentials
+        self._cache_initialized = True
+        logger.info(f"Loaded {len(credentials)} credentials from database")
+
+        return credentials
 
     async def get_credential(self, key: str, default: Any = None, decrypt: bool = True) -> Any:
         """Get a credential value by key."""
@@ -197,8 +235,6 @@ class CredentialService:
     ) -> bool:
         """Set a credential value."""
         try:
-            supabase = self._get_supabase_client()
-
             if is_encrypted:
                 encrypted_value = self._encrypt_value(value)
                 data = {
@@ -229,11 +265,14 @@ class CredentialService:
                 self._cache[key] = value
 
             # Upsert to database with proper conflict handling
-            # Since we validate service key at startup, permission errors here indicate actual database issues
-            supabase.table("archon_settings").upsert(
-                data,
-                on_conflict="key",  # Specify the unique column for conflict resolution
-            ).execute()
+            if is_asyncpg_mode():
+                await self._set_credential_asyncpg(data)
+            else:
+                supabase = self._get_supabase_client()
+                supabase.table("archon_settings").upsert(
+                    data,
+                    on_conflict="key",
+                ).execute()
 
             # Invalidate RAG settings cache if this is a rag_strategy setting
             if category == "rag_strategy":
@@ -272,13 +311,41 @@ class CredentialService:
             logger.error(f"Error setting credential {key}: {e}")
             return False
 
+    async def _set_credential_asyncpg(self, data: dict[str, Any]) -> None:
+        """Upsert credential using asyncpg."""
+        from .database import AsyncPGClient
+
+        await AsyncPGClient.execute(
+            """
+            INSERT INTO archon_settings (key, value, encrypted_value, is_encrypted, category, description)
+            VALUES ($1, $2, $3, $4, $5, $6)
+            ON CONFLICT (key) DO UPDATE SET
+                value = EXCLUDED.value,
+                encrypted_value = EXCLUDED.encrypted_value,
+                is_encrypted = EXCLUDED.is_encrypted,
+                category = EXCLUDED.category,
+                description = EXCLUDED.description
+            """,
+            data["key"],
+            data["value"],
+            data["encrypted_value"],
+            data["is_encrypted"],
+            data["category"],
+            data["description"],
+        )
+
     async def delete_credential(self, key: str) -> bool:
         """Delete a credential."""
         try:
-            supabase = self._get_supabase_client()
-
-            # Since we validate service key at startup, we can directly execute
-            supabase.table("archon_settings").delete().eq("key", key).execute()
+            if is_asyncpg_mode():
+                from .database import AsyncPGClient
+                await AsyncPGClient.execute(
+                    "DELETE FROM archon_settings WHERE key = $1",
+                    key,
+                )
+            else:
+                supabase = self._get_supabase_client()
+                supabase.table("archon_settings").delete().eq("key", key).execute()
 
             # Remove from cache
             if key in self._cache:
@@ -339,13 +406,17 @@ class CredentialService:
                 return self._rag_settings_cache
 
         try:
-            supabase = self._get_supabase_client()
-            result = (
-                supabase.table("archon_settings").select("*").eq("category", category).execute()
-            )
+            if is_asyncpg_mode():
+                rows = await self._get_credentials_by_category_asyncpg(category)
+            else:
+                supabase = self._get_supabase_client()
+                result = (
+                    supabase.table("archon_settings").select("*").eq("category", category).execute()
+                )
+                rows = result.data
 
             credentials = {}
-            for item in result.data:
+            for item in rows:
                 key = item["key"]
                 if item["is_encrypted"]:
                     credentials[key] = {
@@ -368,14 +439,32 @@ class CredentialService:
             logger.error(f"Error getting credentials for category {category}: {e}")
             return {}
 
+    async def _get_credentials_by_category_asyncpg(self, category: str) -> list[dict]:
+        """Get credentials by category using asyncpg."""
+        from .database import AsyncPGClient
+
+        rows = await AsyncPGClient.fetch(
+            "SELECT key, value, encrypted_value, is_encrypted, category, description FROM archon_settings WHERE category = $1",
+            category,
+        )
+        return [dict(row) for row in rows]
+
     async def list_all_credentials(self) -> list[CredentialItem]:
         """Get all credentials as a list of CredentialItem objects (for Settings UI)."""
         try:
-            supabase = self._get_supabase_client()
-            result = supabase.table("archon_settings").select("*").execute()
+            if is_asyncpg_mode():
+                from .database import AsyncPGClient
+                rows = await AsyncPGClient.fetch(
+                    "SELECT key, value, encrypted_value, is_encrypted, category, description FROM archon_settings"
+                )
+                data = [dict(row) for row in rows]
+            else:
+                supabase = self._get_supabase_client()
+                result = supabase.table("archon_settings").select("*").execute()
+                data = result.data
 
             credentials = []
-            for item in result.data:
+            for item in data:
                 if item["is_encrypted"] and item["encrypted_value"]:
                     cred = CredentialItem(
                         key=item["key"],

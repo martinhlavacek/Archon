@@ -1,5 +1,7 @@
 """
 Database migration tracking and management service.
+
+Supports both asyncpg (K8s) and Supabase (legacy) database backends.
 """
 
 import hashlib
@@ -9,7 +11,7 @@ from typing import Any
 import logfire
 from supabase import Client
 
-from .client_manager import get_supabase_client
+from .client_manager import get_supabase_client, is_asyncpg_mode
 from ..config.version import ARCHON_VERSION
 
 
@@ -63,6 +65,33 @@ class MigrationService:
         Returns:
             True if table exists, False otherwise
         """
+        if is_asyncpg_mode():
+            return await self._check_migrations_table_exists_asyncpg()
+        else:
+            return await self._check_migrations_table_exists_supabase()
+
+    async def _check_migrations_table_exists_asyncpg(self) -> bool:
+        """Check migrations table using asyncpg."""
+        from .database import AsyncPGClient
+
+        try:
+            row = await AsyncPGClient.fetchrow(
+                """
+                SELECT EXISTS (
+                    SELECT 1
+                    FROM information_schema.tables
+                    WHERE table_schema = 'public'
+                    AND table_name = 'archon_migrations'
+                ) as exists
+                """
+            )
+            return row["exists"] if row else False
+        except Exception as e:
+            logfire.info(f"Migrations table does not exist (asyncpg): {e}")
+            return False
+
+    async def _check_migrations_table_exists_supabase(self) -> bool:
+        """Check migrations table using Supabase (legacy)."""
         try:
             supabase = self._get_supabase_client()
 
@@ -109,14 +138,30 @@ class MigrationService:
                 logfire.info("Migrations table does not exist, returning empty list")
                 return []
 
-            supabase = self._get_supabase_client()
-            result = supabase.table("archon_migrations").select("*").order("applied_at", desc=True).execute()
+            if is_asyncpg_mode():
+                return await self._get_applied_migrations_asyncpg()
+            else:
+                return await self._get_applied_migrations_supabase()
 
-            return [MigrationRecord(row) for row in result.data]
         except Exception as e:
             logfire.error(f"Error fetching applied migrations: {e}")
             # Return empty list if we can't fetch migrations
             return []
+
+    async def _get_applied_migrations_asyncpg(self) -> list[MigrationRecord]:
+        """Get applied migrations using asyncpg."""
+        from .database import AsyncPGClient
+
+        rows = await AsyncPGClient.fetch(
+            "SELECT id, version, migration_name, applied_at, checksum FROM archon_migrations ORDER BY applied_at DESC"
+        )
+        return [MigrationRecord(dict(row)) for row in rows]
+
+    async def _get_applied_migrations_supabase(self) -> list[MigrationRecord]:
+        """Get applied migrations using Supabase (legacy)."""
+        supabase = self._get_supabase_client()
+        result = supabase.table("archon_migrations").select("*").order("applied_at", desc=True).execute()
+        return [MigrationRecord(row) for row in result.data]
 
     async def scan_migration_directory(self) -> list[PendingMigration]:
         """
