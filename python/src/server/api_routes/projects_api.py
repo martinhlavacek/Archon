@@ -93,7 +93,7 @@ async def list_projects(
 
         # Use ProjectService to get projects with include_content parameter
         project_service = ProjectService()
-        success, result = project_service.list_projects(include_content=include_content)
+        success, result = await project_service.list_projects(include_content=include_content)
 
         if not success:
             raise HTTPException(status_code=500, detail=result)
@@ -102,7 +102,7 @@ async def list_projects(
         if include_content:
             # Use SourceLinkingService to format projects with sources
             source_service = SourceLinkingService()
-            formatted_projects = source_service.format_projects_with_sources(result["projects"])
+            formatted_projects = await source_service.format_projects_with_sources(result["projects"])
         else:
             # Lightweight response doesn't need source formatting
             formatted_projects = result["projects"]
@@ -222,7 +222,7 @@ async def projects_health():
         try:
             project_service = ProjectService(supabase_client)
             # Try to list projects with limit 1 to test table access
-            success, _ = project_service.list_projects()
+            success, _ = await project_service.list_projects()
             projects_table_exists = success
             if success:
                 logfire.info("Projects table detected successfully")
@@ -236,7 +236,7 @@ async def projects_health():
         try:
             task_service = TaskService(supabase_client)
             # Try to list tasks with limit 1 to test table access
-            success, _ = task_service.list_tasks(include_closed=True)
+            success, _ = await task_service.list_tasks(include_closed=True)
             tasks_table_exists = success
             if success:
                 logfire.info("Tasks table detected successfully")
@@ -343,7 +343,7 @@ async def get_project(project_id: str):
 
         # Use ProjectService to get the project
         project_service = ProjectService()
-        success, result = project_service.get_project(project_id)
+        success, result = await project_service.get_project(project_id)
 
         if not success:
             if "not found" in result.get("error", "").lower():
@@ -407,7 +407,7 @@ async def update_project(project_id: str, request: UpdateProjectRequest):
 
                 # Get current project for comparison
                 project_service = ProjectService(supabase_client)
-                success, current_result = project_service.get_project(project_id)
+                success, current_result = await project_service.get_project(project_id)
 
                 if success and current_result.get("project"):
                     current_project = current_result["project"]
@@ -441,7 +441,7 @@ async def update_project(project_id: str, request: UpdateProjectRequest):
 
         # Use ProjectService to update the project
         project_service = ProjectService(supabase_client)
-        success, result = project_service.update_project(project_id, update_fields)
+        success, result = await project_service.update_project(project_id, update_fields)
 
         if not success:
             if "not found" in result.get("error", "").lower():
@@ -457,7 +457,7 @@ async def update_project(project_id: str, request: UpdateProjectRequest):
         source_service = SourceLinkingService(supabase_client)
 
         if request.technical_sources is not None or request.business_sources is not None:
-            source_success, source_result = source_service.update_project_sources(
+            source_success, source_result = await source_service.update_project_sources(
                 project_id=project_id,
                 technical_sources=request.technical_sources,
                 business_sources=request.business_sources,
@@ -471,7 +471,7 @@ async def update_project(project_id: str, request: UpdateProjectRequest):
                 logfire.warning(f"Failed to update some sources: {source_result}")
 
         # Format project response with sources using SourceLinkingService
-        formatted_project = source_service.format_project_with_sources(project)
+        formatted_project = await source_service.format_project_with_sources(project)
 
         logfire.info(
             f"Project updated successfully | project_id={project_id} | title={project.get('title')} | technical_sources={len(formatted_project.get('technical_sources', []))} | business_sources={len(formatted_project.get('business_sources', []))}"
@@ -494,7 +494,7 @@ async def delete_project(project_id: str):
 
         # Use ProjectService to delete the project
         project_service = ProjectService()
-        success, result = project_service.delete_project(project_id)
+        success, result = await project_service.delete_project(project_id)
 
         if not success:
             if "not found" in result.get("error", "").lower():
@@ -526,7 +526,7 @@ async def get_project_features(project_id: str):
 
         # Use ProjectService to get features
         project_service = ProjectService()
-        success, result = project_service.get_project_features(project_id)
+        success, result = await project_service.get_project_features(project_id)
 
         if not success:
             if "not found" in result.get("error", "").lower():
@@ -567,7 +567,7 @@ async def list_project_tasks(
 
         # Use TaskService to list tasks
         task_service = TaskService()
-        success, result = task_service.list_tasks(
+        success, result = await task_service.list_tasks(
             project_id=project_id,
             include_closed=True,  # Get all tasks, including done
             exclude_large_fields=exclude_large_fields,
@@ -706,7 +706,7 @@ async def list_tasks(
 
         # Use TaskService to list tasks
         task_service = TaskService()
-        success, result = task_service.list_tasks(
+        success, result = await task_service.list_tasks(
             project_id=project_id,
             status=status,
             include_closed=include_closed,
@@ -775,7 +775,7 @@ async def get_task(task_id: str):
     try:
         # Use TaskService to get the task
         task_service = TaskService()
-        success, result = task_service.get_task(task_id)
+        success, result = await task_service.get_task(task_id)
 
         if not success:
             if "not found" in result.get("error", "").lower():
@@ -970,7 +970,7 @@ async def list_project_documents(project_id: str, include_content: bool = False)
 
         # Use DocumentService to list documents
         document_service = DocumentService()
-        success, result = document_service.list_documents(project_id, include_content=include_content)
+        success, result = await document_service.list_documents(project_id, include_content=include_content)
 
         if not success:
             if "not found" in result.get("error", "").lower():
@@ -1001,7 +1001,7 @@ async def create_project_document(project_id: str, request: CreateDocumentReques
 
         # Use DocumentService to create document
         document_service = DocumentService()
-        success, result = document_service.add_document(
+        success, result = await document_service.add_document(
             project_id=project_id,
             document_type=request.document_type,
             title=request.title,
@@ -1037,7 +1037,7 @@ async def get_project_document(project_id: str, doc_id: str):
 
         # Use DocumentService to get document
         document_service = DocumentService()
-        success, result = document_service.get_document(project_id, doc_id)
+        success, result = await document_service.get_document(project_id, doc_id)
 
         if not success:
             if "not found" in result.get("error", "").lower():
@@ -1077,7 +1077,7 @@ async def update_project_document(project_id: str, doc_id: str, request: UpdateD
 
         # Use DocumentService to update document
         document_service = DocumentService()
-        success, result = document_service.update_document(project_id, doc_id, update_fields)
+        success, result = await document_service.update_document(project_id, doc_id, update_fields)
 
         if not success:
             if "not found" in result.get("error", "").lower():
@@ -1106,7 +1106,7 @@ async def delete_project_document(project_id: str, doc_id: str):
 
         # Use DocumentService to delete document
         document_service = DocumentService()
-        success, result = document_service.delete_document(project_id, doc_id)
+        success, result = await document_service.delete_document(project_id, doc_id)
 
         if not success:
             if "not found" in result.get("error", "").lower():
