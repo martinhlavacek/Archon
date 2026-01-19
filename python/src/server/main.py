@@ -11,6 +11,11 @@ Modules:
 - projects_api: Project and task management with streaming
 """
 
+# Load environment variables from .env file FIRST
+# Must be done before any other imports that might use env vars
+from dotenv import load_dotenv
+load_dotenv()
+
 import logging
 import os
 from contextlib import asynccontextmanager

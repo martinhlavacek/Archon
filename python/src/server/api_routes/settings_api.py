@@ -15,6 +15,7 @@ from pydantic import BaseModel
 
 # Import logging
 from ..config.logfire_config import logfire
+from ..services.client_manager import is_asyncpg_mode
 from ..services.credential_service import credential_service, initialize_credentials
 from ..utils import get_supabase_client
 
@@ -283,38 +284,59 @@ async def database_metrics():
     """Get database metrics and statistics."""
     try:
         logfire.info("Getting database metrics")
-        supabase_client = get_supabase_client()
 
         # Get various table counts
         tables_info = {}
 
-        # Get projects count
-        projects_response = (
-            supabase_client.table("archon_projects").select("id", count="exact").execute()
-        )
-        tables_info["projects"] = (
-            projects_response.count if projects_response.count is not None else 0
-        )
+        if is_asyncpg_mode():
+            from ..services.database import AsyncPGClient
 
-        # Get tasks count
-        tasks_response = supabase_client.table("archon_tasks").select("id", count="exact").execute()
-        tables_info["tasks"] = tasks_response.count if tasks_response.count is not None else 0
+            # Get counts using raw SQL
+            projects_row = await AsyncPGClient.fetchrow("SELECT COUNT(*) as count FROM archon_projects")
+            tables_info["projects"] = projects_row["count"] if projects_row else 0
 
-        # Get crawled pages count
-        pages_response = (
-            supabase_client.table("archon_crawled_pages").select("id", count="exact").execute()
-        )
-        tables_info["crawled_pages"] = (
-            pages_response.count if pages_response.count is not None else 0
-        )
+            tasks_row = await AsyncPGClient.fetchrow("SELECT COUNT(*) as count FROM archon_tasks")
+            tables_info["tasks"] = tasks_row["count"] if tasks_row else 0
 
-        # Get settings count
-        settings_response = (
-            supabase_client.table("archon_settings").select("id", count="exact").execute()
-        )
-        tables_info["settings"] = (
-            settings_response.count if settings_response.count is not None else 0
-        )
+            pages_row = await AsyncPGClient.fetchrow("SELECT COUNT(*) as count FROM archon_crawled_pages")
+            tables_info["crawled_pages"] = pages_row["count"] if pages_row else 0
+
+            settings_row = await AsyncPGClient.fetchrow("SELECT COUNT(*) as count FROM archon_settings")
+            tables_info["settings"] = settings_row["count"] if settings_row else 0
+
+            database_type = "asyncpg"
+        else:
+            supabase_client = get_supabase_client()
+
+            # Get projects count
+            projects_response = (
+                supabase_client.table("archon_projects").select("id", count="exact").execute()
+            )
+            tables_info["projects"] = (
+                projects_response.count if projects_response.count is not None else 0
+            )
+
+            # Get tasks count
+            tasks_response = supabase_client.table("archon_tasks").select("id", count="exact").execute()
+            tables_info["tasks"] = tasks_response.count if tasks_response.count is not None else 0
+
+            # Get crawled pages count
+            pages_response = (
+                supabase_client.table("archon_crawled_pages").select("id", count="exact").execute()
+            )
+            tables_info["crawled_pages"] = (
+                pages_response.count if pages_response.count is not None else 0
+            )
+
+            # Get settings count
+            settings_response = (
+                supabase_client.table("archon_settings").select("id", count="exact").execute()
+            )
+            tables_info["settings"] = (
+                settings_response.count if settings_response.count is not None else 0
+            )
+
+            database_type = "supabase"
 
         total_records = sum(tables_info.values())
         logfire.info(
@@ -323,7 +345,7 @@ async def database_metrics():
 
         return {
             "status": "healthy",
-            "database": "supabase",
+            "database": database_type,
             "tables": tables_info,
             "total_records": total_records,
             "timestamp": datetime.now().isoformat(),

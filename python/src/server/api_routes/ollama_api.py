@@ -16,6 +16,7 @@ from fastapi import APIRouter, BackgroundTasks, HTTPException, Query
 from pydantic import BaseModel, Field
 
 from ..config.logfire_config import get_logger
+from ..services.client_manager import is_asyncpg_mode
 from ..services.llm_provider_service import validate_provider_instance
 from ..services.ollama.embedding_router import embedding_router
 from ..services.ollama.model_discovery_service import model_discovery_service
@@ -420,11 +421,6 @@ async def discover_and_store_models_endpoint(request: ModelDiscoveryAndStoreRequ
     try:
         logger.info(f"Starting model discovery and storage for {len(request.instance_urls)} instances")
 
-        from ..utils import get_supabase_client
-
-        # Store using direct database insert
-        supabase = get_supabase_client()
-
         stored_models = []
         instances_checked = 0
 
@@ -473,13 +469,35 @@ async def discover_and_store_models_endpoint(request: ModelDiscoveryAndStoreRequ
         }
 
         # Upsert into archon_settings table
-        result = supabase.table("archon_settings").upsert({
-            "key": "ollama_discovered_models",
-            "value": json.dumps(models_data),
-            "category": "ollama",
-            "description": "Discovered Ollama models with compatibility information",
-            "updated_at": datetime.now().isoformat()
-        }).execute()
+        if is_asyncpg_mode():
+            from ..services.database import AsyncPGClient
+
+            await AsyncPGClient.execute(
+                """
+                INSERT INTO archon_settings (key, value, category, description, updated_at)
+                VALUES ($1, $2, $3, $4, $5)
+                ON CONFLICT (key) DO UPDATE SET
+                    value = EXCLUDED.value,
+                    category = EXCLUDED.category,
+                    description = EXCLUDED.description,
+                    updated_at = EXCLUDED.updated_at
+                """,
+                "ollama_discovered_models",
+                json.dumps(models_data),
+                "ollama",
+                "Discovered Ollama models with compatibility information",
+                datetime.now().isoformat()
+            )
+        else:
+            from ..utils import get_supabase_client
+            supabase = get_supabase_client()
+            supabase.table("archon_settings").upsert({
+                "key": "ollama_discovered_models",
+                "value": json.dumps(models_data),
+                "category": "ollama",
+                "description": "Discovered Ollama models with compatibility information",
+                "updated_at": datetime.now().isoformat()
+            }).execute()
 
         logger.info(f"Stored {len(stored_models)} models from {instances_checked} instances")
 
@@ -507,12 +525,20 @@ async def get_stored_models_endpoint() -> ModelListResponse:
     try:
         logger.info("Retrieving stored Ollama models")
 
-        from ..utils import get_supabase_client
-        supabase = get_supabase_client()
-
         # Get stored models from archon_settings
-        result = supabase.table("archon_settings").select("value").eq("key", "ollama_discovered_models").execute()
-        models_setting = result.data[0]["value"] if result.data else None
+        if is_asyncpg_mode():
+            from ..services.database import AsyncPGClient
+
+            row = await AsyncPGClient.fetchrow(
+                "SELECT value FROM archon_settings WHERE key = $1",
+                "ollama_discovered_models"
+            )
+            models_setting = row["value"] if row else None
+        else:
+            from ..utils import get_supabase_client
+            supabase = get_supabase_client()
+            result = supabase.table("archon_settings").select("value").eq("key", "ollama_discovered_models").execute()
+            models_setting = result.data[0]["value"] if result.data else None
 
         if not models_setting:
             return ModelListResponse(
@@ -967,9 +993,6 @@ async def discover_models_with_real_details(request: ModelDiscoveryAndStoreReque
 
         import httpx
 
-        from ..utils import get_supabase_client
-
-        supabase = get_supabase_client()
         stored_models = []
         instances_checked = 0
 
@@ -1117,11 +1140,28 @@ async def discover_models_with_real_details(request: ModelDiscoveryAndStoreReque
         logger.info(f"Storing {len(embedding_models_with_dims)} embedding models with dimensions: {[(m['name'], m.get('embedding_dimensions')) for m in embedding_models_with_dims]}")
 
         # Update the stored models
-        result = supabase.table("archon_settings").update({
-            "value": json.dumps(models_data),
-            "description": "Real Ollama model data from API endpoints",
-            "updated_at": datetime.now().isoformat()
-        }).eq("key", "ollama_discovered_models").execute()
+        if is_asyncpg_mode():
+            from ..services.database import AsyncPGClient
+
+            await AsyncPGClient.execute(
+                """
+                UPDATE archon_settings
+                SET value = $1, description = $2, updated_at = $3
+                WHERE key = $4
+                """,
+                json.dumps(models_data),
+                "Real Ollama model data from API endpoints",
+                datetime.now().isoformat(),
+                "ollama_discovered_models"
+            )
+        else:
+            from ..utils import get_supabase_client
+            supabase = get_supabase_client()
+            supabase.table("archon_settings").update({
+                "value": json.dumps(models_data),
+                "description": "Real Ollama model data from API endpoints",
+                "updated_at": datetime.now().isoformat()
+            }).eq("key", "ollama_discovered_models").execute()
 
         logger.info(f"Stored {len(stored_models)} models with real data from {instances_checked} instances")
 

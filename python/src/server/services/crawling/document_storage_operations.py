@@ -183,7 +183,8 @@ class DocumentStorageOperations:
 
         # Store pages AFTER source is created but BEFORE chunks (FK constraint requirement)
         from .page_storage_operations import PageStorageOperations
-        page_storage_ops = PageStorageOperations(self.supabase_client)
+        # In asyncpg mode, pass None - PageStorageOperations handles asyncpg internally
+        page_storage_ops = PageStorageOperations(None if self._mode != "supabase" else self._supabase_client)
 
         # Check if this is an llms-full.txt file
         is_llms_full = crawl_type == "llms-txt" or (
@@ -278,8 +279,9 @@ class DocumentStorageOperations:
         )
 
         # Call add_documents_to_supabase with the correct parameters
+        # In asyncpg mode, pass None - function handles asyncpg internally
         storage_stats = await add_documents_to_supabase(
-            client=self.supabase_client,
+            client=None if self._mode != "supabase" else self._supabase_client,
             urls=all_urls,  # Now has entry per chunk
             chunk_numbers=all_chunk_numbers,  # Proper chunk numbers (0, 1, 2, etc)
             contents=all_contents,  # Individual chunks
@@ -374,20 +376,76 @@ class DocumentStorageOperations:
                 f"About to create/update source record for '{source_id}' (word count: {source_id_word_counts[source_id]})"
             )
             try:
-                # Call async update_source_info directly
-                await update_source_info(
-                    client=self.supabase_client,
-                    source_id=source_id,
-                    summary=summary,
-                    word_count=source_id_word_counts[source_id],
-                    content=combined_content,
-                    knowledge_type=request.get("knowledge_type", "documentation"),
-                    tags=request.get("tags", []),
-                    update_frequency=0,  # Set to 0 since we're using manual refresh
-                    original_url=request.get("url"),  # Store the original crawl URL
-                    source_url=source_url,
-                    source_display_name=source_display_name,
-                )
+                if is_asyncpg_mode():
+                    # Use asyncpg directly for source upsert
+                    from ..database import AsyncPGClient
+
+                    # Determine source_type
+                    determined_source_type = "url"
+                    if source_url and source_url.startswith("file://"):
+                        determined_source_type = "file"
+                    elif request.get("url", "").startswith("file://"):
+                        determined_source_type = "file"
+
+                    metadata = {
+                        "knowledge_type": request.get("knowledge_type", "documentation"),
+                        "tags": request.get("tags", []),
+                        "source_type": determined_source_type,
+                        "auto_generated": False,
+                        "update_frequency": 0,
+                        "original_url": request.get("url"),
+                    }
+
+                    # Check if source exists to preserve title
+                    existing = await AsyncPGClient.fetchrow(
+                        "SELECT title FROM archon_sources WHERE source_id = $1",
+                        source_id
+                    )
+
+                    if existing:
+                        # Preserve existing title
+                        title = existing["title"]
+                    elif source_display_name:
+                        title = source_display_name[:100].strip()
+                    else:
+                        title = source_id
+
+                    await AsyncPGClient.execute(
+                        """
+                        INSERT INTO archon_sources (source_id, title, summary, total_word_count, metadata, source_url, source_display_name)
+                        VALUES ($1, $2, $3, $4, $5::jsonb, $6, $7)
+                        ON CONFLICT (source_id) DO UPDATE SET
+                            title = EXCLUDED.title,
+                            summary = EXCLUDED.summary,
+                            total_word_count = EXCLUDED.total_word_count,
+                            metadata = EXCLUDED.metadata,
+                            source_url = EXCLUDED.source_url,
+                            source_display_name = EXCLUDED.source_display_name,
+                            updated_at = NOW()
+                        """,
+                        source_id,
+                        title,
+                        summary,
+                        source_id_word_counts[source_id],
+                        json.dumps(metadata),
+                        source_url,
+                        source_display_name,
+                    )
+                else:
+                    # Call async update_source_info directly (legacy Supabase mode)
+                    await update_source_info(
+                        client=self._supabase_client,
+                        source_id=source_id,
+                        summary=summary,
+                        word_count=source_id_word_counts[source_id],
+                        content=combined_content,
+                        knowledge_type=request.get("knowledge_type", "documentation"),
+                        tags=request.get("tags", []),
+                        update_frequency=0,  # Set to 0 since we're using manual refresh
+                        original_url=request.get("url"),  # Store the original crawl URL
+                        source_url=source_url,
+                        source_display_name=source_display_name,
+                    )
                 safe_logfire_info(f"Successfully created/updated source record for '{source_id}'")
             except Exception as e:
                 logger.error(f"Failed to create/update source record for '{source_id}'", exc_info=True)

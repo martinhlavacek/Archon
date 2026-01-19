@@ -670,6 +670,9 @@ class KnowledgeItemService:
             Transformed knowledge item
         """
         source_metadata = source.get("metadata", {})
+        # Handle asyncpg returning JSONB as string
+        if isinstance(source_metadata, str):
+            source_metadata = json.loads(source_metadata)
         source_id = source["source_id"]
 
         # Get first page URL

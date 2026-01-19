@@ -15,6 +15,7 @@ import tldextract
 
 from ...config.logfire_config import get_logger, safe_logfire_error, safe_logfire_info
 from ...utils import get_supabase_client
+from ..client_manager import is_asyncpg_mode
 from ...utils.progress.progress_tracker import ProgressTracker
 from ..credential_service import credential_service
 
@@ -112,7 +113,12 @@ class CrawlingService:
             progress_id: Optional progress ID for HTTP polling updates
         """
         self.crawler = crawler
-        self.supabase_client = supabase_client or get_supabase_client()
+        # In asyncpg mode, storage operations handle database internally
+        # so we don't need the supabase_client
+        if is_asyncpg_mode():
+            self.supabase_client = None
+        else:
+            self.supabase_client = supabase_client or get_supabase_client()
         self.progress_id = progress_id
         self.progress_tracker = None
 

@@ -1371,7 +1371,12 @@ async def add_code_examples_to_supabase(
                         for col in ["embedding_768", "embedding_1024", "embedding_1536", "embedding_3072"]:
                             if col in record:
                                 embedding_col = col
-                                embedding_val = record[col]
+                                # Convert embedding list to pgvector string format
+                                embedding_list = record[col]
+                                if isinstance(embedding_list, list):
+                                    embedding_val = "[" + ",".join(str(x) for x in embedding_list) + "]"
+                                else:
+                                    embedding_val = embedding_list
                                 break
 
                         await AsyncPGClient.execute(
@@ -1379,7 +1384,7 @@ async def add_code_examples_to_supabase(
                             INSERT INTO archon_code_examples
                             (url, chunk_number, content, summary, metadata, source_id,
                              {embedding_col}, llm_chat_model, embedding_model, embedding_dimension)
-                            VALUES ($1, $2, $3, $4, $5::jsonb, $6, $7, $8, $9, $10)
+                            VALUES ($1, $2, $3, $4, $5::jsonb, $6, $7::vector, $8, $9, $10)
                             """,
                             record["url"],
                             record["chunk_number"],
@@ -1421,7 +1426,12 @@ async def add_code_examples_to_supabase(
                                 for col in ["embedding_768", "embedding_1024", "embedding_1536", "embedding_3072"]:
                                     if col in record:
                                         embedding_col = col
-                                        embedding_val = record[col]
+                                        # Convert embedding list to pgvector string format
+                                        embedding_list = record[col]
+                                        if isinstance(embedding_list, list):
+                                            embedding_val = "[" + ",".join(str(x) for x in embedding_list) + "]"
+                                        else:
+                                            embedding_val = embedding_list
                                         break
 
                                 await AsyncPGClient.execute(
@@ -1429,7 +1439,7 @@ async def add_code_examples_to_supabase(
                                     INSERT INTO archon_code_examples
                                     (url, chunk_number, content, summary, metadata, source_id,
                                      {embedding_col}, llm_chat_model, embedding_model, embedding_dimension)
-                                    VALUES ($1, $2, $3, $4, $5::jsonb, $6, $7, $8, $9, $10)
+                                    VALUES ($1, $2, $3, $4, $5::jsonb, $6, $7::vector, $8, $9, $10)
                                     """,
                                     record["url"],
                                     record["chunk_number"],

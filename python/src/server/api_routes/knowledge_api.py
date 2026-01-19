@@ -749,9 +749,8 @@ async def refresh_knowledge_item(source_id: str):
             )
 
         # Use the same crawl orchestration as regular crawl
-        crawl_service = CrawlingService(
-            crawler=crawler, supabase_client=get_supabase_client()
-        )
+        # CrawlingService handles database mode (asyncpg/supabase) internally
+        crawl_service = CrawlingService(crawler=crawler)
         crawl_service.set_progress_id(progress_id)
 
         # Start the crawl task with proper request format
@@ -903,8 +902,8 @@ async def _perform_crawl_with_progress(
                 await tracker.error(f"Failed to initialize crawler: {str(e)}")
                 return
 
-            supabase_client = get_supabase_client()
-            orchestration_service = CrawlingService(crawler, supabase_client)
+            # CrawlingService handles database mode (asyncpg/supabase) internally
+            orchestration_service = CrawlingService(crawler)
             orchestration_service.set_progress_id(progress_id)
 
             # Convert request to dict for service
