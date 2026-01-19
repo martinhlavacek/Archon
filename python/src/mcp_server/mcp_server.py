@@ -14,6 +14,8 @@ Note: Crawling and document upload operations are handled directly by the
 API service and frontend, not through MCP tools.
 """
 
+__version__ = "0.2.0"  # K8s-compatible release
+
 import json
 import logging
 import os
