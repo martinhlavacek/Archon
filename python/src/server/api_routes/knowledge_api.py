@@ -589,40 +589,72 @@ async def get_knowledge_item_code_examples(
             f"Fetching code examples | source_id={source_id} | limit={limit} | offset={offset}"
         )
 
-        supabase = get_supabase_client()
+        from ..services.client_manager import is_asyncpg_mode
 
-        # First get total count
-        count_result = (
-            supabase.from_("archon_code_examples")
-            .select("id", count="exact", head=True)
-            .eq("source_id", source_id)
-            .execute()
-        )
-        total = count_result.count if hasattr(count_result, "count") else 0
+        if is_asyncpg_mode():
+            from ..services.database import AsyncPGClient
 
-        # Get paginated code examples
-        result = (
-            supabase.from_("archon_code_examples")
-            .select("id, source_id, content, summary, metadata")
-            .eq("source_id", source_id)
-            .order("id", desc=False)  # Deterministic ordering
-            .range(offset, offset + limit - 1)
-            .execute()
-        )
-
-        # Check for error to match chunks endpoint pattern
-        if hasattr(result, "error") and result.error is not None:
-            safe_logfire_error(
-                f"Supabase query error (code examples) | source_id={source_id} | error={result.error}"
+            # Get total count
+            count_result = await AsyncPGClient.fetchrow(
+                "SELECT COUNT(*) FROM archon_code_examples WHERE source_id = $1",
+                source_id
             )
-            raise HTTPException(status_code=500, detail={"error": str(result.error)})
+            total = count_result["count"] if count_result else 0
 
-        code_examples = result.data if result.data else []
+            # Get paginated code examples
+            rows = await AsyncPGClient.fetch(
+                """
+                SELECT id, source_id, content, summary, metadata
+                FROM archon_code_examples
+                WHERE source_id = $1
+                ORDER BY id ASC
+                LIMIT $2 OFFSET $3
+                """,
+                source_id, limit, offset
+            )
+            code_examples = [dict(row) for row in rows] if rows else []
+        else:
+            supabase = get_supabase_client()
+
+            # First get total count
+            count_result = (
+                supabase.from_("archon_code_examples")
+                .select("id", count="exact", head=True)
+                .eq("source_id", source_id)
+                .execute()
+            )
+            total = count_result.count if hasattr(count_result, "count") else 0
+
+            # Get paginated code examples
+            result = (
+                supabase.from_("archon_code_examples")
+                .select("id, source_id, content, summary, metadata")
+                .eq("source_id", source_id)
+                .order("id", desc=False)  # Deterministic ordering
+                .range(offset, offset + limit - 1)
+                .execute()
+            )
+
+            # Check for error to match chunks endpoint pattern
+            if hasattr(result, "error") and result.error is not None:
+                safe_logfire_error(
+                    f"Supabase query error (code examples) | source_id={source_id} | error={result.error}"
+                )
+                raise HTTPException(status_code=500, detail={"error": str(result.error)})
+
+            code_examples = result.data if result.data else []
 
         # Extract title and example_name from metadata to top level for frontend
         # This ensures the API response matches the TypeScript CodeExample interface
         for example in code_examples:
             metadata = example.get("metadata", {}) or {}
+            # Handle case where metadata is a JSON string
+            if isinstance(metadata, str):
+                import json
+                try:
+                    metadata = json.loads(metadata)
+                except (json.JSONDecodeError, TypeError):
+                    metadata = {}
             # Extract fields to match frontend TypeScript types
             example["title"] = metadata.get("title")  # AI-generated title
             example["example_name"] = metadata.get("example_name")  # Same as title for compatibility
