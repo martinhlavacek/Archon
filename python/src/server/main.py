@@ -280,12 +280,23 @@ async def _check_database_schema():
         return _schema_check_cache["result"]
 
     try:
-        from .services.client_manager import get_supabase_client
+        from .services.client_manager import is_asyncpg_mode
 
-        client = get_supabase_client()
+        if is_asyncpg_mode():
+            # In asyncpg mode, check schema using AsyncPGClient
+            from .services.database import AsyncPGClient
 
-        # Try to query the new columns directly - if they exist, schema is up to date
-        client.table('archon_sources').select('source_url, source_display_name').limit(1).execute()
+            # Try to query the new columns directly - if they exist, schema is up to date
+            await AsyncPGClient.fetch(
+                "SELECT source_url, source_display_name FROM archon_sources LIMIT 1"
+            )
+        else:
+            from .services.client_manager import get_supabase_client
+
+            client = get_supabase_client()
+
+            # Try to query the new columns directly - if they exist, schema is up to date
+            client.table('archon_sources').select('source_url, source_display_name').limit(1).execute()
 
         # Cache successful result permanently
         _schema_check_cache["valid"] = True
