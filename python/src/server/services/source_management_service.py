@@ -3,14 +3,17 @@ Source Management Service
 
 Handles source metadata, summaries, and management.
 Consolidates both utility functions and class-based service.
+
+Supports both asyncpg (K8s) and Supabase (legacy) database backends.
 """
 
+import json
 from typing import Any
 
 from supabase import Client
 
 from ..config.logfire_config import get_logger, search_logger
-from .client_manager import get_supabase_client
+from .client_manager import get_supabase_client, get_database_mode, is_asyncpg_mode
 from .llm_provider_service import extract_message_text, get_llm_client
 
 logger = get_logger(__name__)
@@ -363,10 +366,20 @@ class SourceManagementService:
     """Service class for source management operations"""
 
     def __init__(self, supabase_client=None):
-        """Initialize with optional supabase client"""
-        self.supabase_client = supabase_client or get_supabase_client()
+        """Initialize with optional supabase client (legacy mode only)"""
+        self._supabase_client = supabase_client
+        self._mode = get_database_mode()
 
-    def get_available_sources(self) -> tuple[bool, dict[str, Any]]:
+    @property
+    def supabase_client(self):
+        """Lazy load Supabase client for legacy mode."""
+        if self._mode != "supabase":
+            raise ValueError("Supabase client not available in asyncpg mode")
+        if self._supabase_client is None:
+            self._supabase_client = get_supabase_client()
+        return self._supabase_client
+
+    async def get_available_sources(self) -> tuple[bool, dict[str, Any]]:
         """
         Get all available sources from the sources table.
 
@@ -376,25 +389,52 @@ class SourceManagementService:
             Tuple of (success, result_dict)
         """
         try:
-            response = self.supabase_client.table("archon_sources").select("*").execute()
-
-            sources = []
-            for row in response.data:
-                sources.append({
-                    "source_id": row["source_id"],
-                    "title": row.get("title", ""),
-                    "summary": row.get("summary", ""),
-                    "created_at": row.get("created_at", ""),
-                    "updated_at": row.get("updated_at", ""),
-                })
-
-            return True, {"sources": sources, "total_count": len(sources)}
+            if is_asyncpg_mode():
+                return await self._get_available_sources_asyncpg()
+            else:
+                return self._get_available_sources_supabase()
 
         except Exception as e:
             logger.error(f"Error retrieving sources: {e}")
             return False, {"error": f"Error retrieving sources: {str(e)}"}
 
-    def delete_source(self, source_id: str) -> tuple[bool, dict[str, Any]]:
+    async def _get_available_sources_asyncpg(self) -> tuple[bool, dict[str, Any]]:
+        """Get available sources using asyncpg."""
+        from .database import AsyncPGClient
+
+        rows = await AsyncPGClient.fetch(
+            "SELECT * FROM archon_sources"
+        )
+
+        sources = []
+        for row in rows:
+            sources.append({
+                "source_id": row["source_id"],
+                "title": row.get("title", ""),
+                "summary": row.get("summary", ""),
+                "created_at": str(row.get("created_at", "")) if row.get("created_at") else "",
+                "updated_at": str(row.get("updated_at", "")) if row.get("updated_at") else "",
+            })
+
+        return True, {"sources": sources, "total_count": len(sources)}
+
+    def _get_available_sources_supabase(self) -> tuple[bool, dict[str, Any]]:
+        """Get available sources using Supabase (legacy)."""
+        response = self.supabase_client.table("archon_sources").select("*").execute()
+
+        sources = []
+        for row in response.data:
+            sources.append({
+                "source_id": row["source_id"],
+                "title": row.get("title", ""),
+                "summary": row.get("summary", ""),
+                "created_at": row.get("created_at", ""),
+                "updated_at": row.get("updated_at", ""),
+            })
+
+        return True, {"sources": sources, "total_count": len(sources)}
+
+    async def delete_source(self, source_id: str) -> tuple[bool, dict[str, Any]]:
         """
         Delete a source from the database.
 
@@ -410,34 +450,61 @@ class SourceManagementService:
         try:
             logger.info(f"Starting delete_source for source_id: {source_id}")
 
-            # With CASCADE DELETE, we only need to delete from the sources table
-            # The database will automatically handle deleting related records
-            logger.info(f"Deleting source {source_id} (CASCADE will handle related records)")
-
-            source_response = (
-                self.supabase_client.table("archon_sources")
-                .delete()
-                .eq("source_id", source_id)
-                .execute()
-            )
-
-            source_deleted = len(source_response.data) if source_response.data else 0
-
-            if source_deleted > 0:
-                logger.info(f"Successfully deleted source {source_id} and all related data via CASCADE")
-                return True, {
-                    "source_id": source_id,
-                    "message": "Source and all related data deleted successfully via CASCADE DELETE"
-                }
+            if is_asyncpg_mode():
+                return await self._delete_source_asyncpg(source_id)
             else:
-                logger.warning(f"No source found with ID {source_id}")
-                return False, {"error": f"Source {source_id} not found"}
+                return self._delete_source_supabase(source_id)
 
         except Exception as e:
             logger.error(f"Error deleting source {source_id}: {e}")
             return False, {"error": f"Error deleting source: {str(e)}"}
 
-    def update_source_metadata(
+    async def _delete_source_asyncpg(self, source_id: str) -> tuple[bool, dict[str, Any]]:
+        """Delete source using asyncpg."""
+        from .database import AsyncPGClient
+
+        logger.info(f"Deleting source {source_id} (CASCADE will handle related records)")
+
+        result = await AsyncPGClient.execute(
+            "DELETE FROM archon_sources WHERE source_id = $1",
+            source_id
+        )
+
+        # Check if any rows were affected
+        if result and "DELETE" in result:
+            logger.info(f"Successfully deleted source {source_id} and all related data via CASCADE")
+            return True, {
+                "source_id": source_id,
+                "message": "Source and all related data deleted successfully via CASCADE DELETE"
+            }
+        else:
+            logger.warning(f"No source found with ID {source_id}")
+            return False, {"error": f"Source {source_id} not found"}
+
+    def _delete_source_supabase(self, source_id: str) -> tuple[bool, dict[str, Any]]:
+        """Delete source using Supabase (legacy)."""
+        logger.info(f"Deleting source {source_id} (CASCADE will handle related records)")
+
+        source_response = (
+            self.supabase_client.table("archon_sources")
+            .delete()
+            .eq("source_id", source_id)
+            .execute()
+        )
+
+        source_deleted = len(source_response.data) if source_response.data else 0
+
+        if source_deleted > 0:
+            logger.info(f"Successfully deleted source {source_id} and all related data via CASCADE")
+            return True, {
+                "source_id": source_id,
+                "message": "Source and all related data deleted successfully via CASCADE DELETE"
+            }
+        else:
+            logger.warning(f"No source found with ID {source_id}")
+            return False, {"error": f"Source {source_id} not found"}
+
+    async def update_source_metadata(
         self,
         source_id: str,
         title: str = None,
@@ -461,52 +528,143 @@ class SourceManagementService:
             Tuple of (success, result_dict)
         """
         try:
-            # Build update data
-            update_data = {}
-            if title is not None:
-                update_data["title"] = title
-            if summary is not None:
-                update_data["summary"] = summary
-            if word_count is not None:
-                update_data["total_word_count"] = word_count
-
-            # Handle metadata fields
-            if knowledge_type is not None or tags is not None:
-                # Get existing metadata
-                existing = (
-                    self.supabase_client.table("archon_sources")
-                    .select("metadata")
-                    .eq("source_id", source_id)
-                    .execute()
+            if is_asyncpg_mode():
+                return await self._update_source_metadata_asyncpg(
+                    source_id, title, summary, word_count, knowledge_type, tags
                 )
-                metadata = existing.data[0].get("metadata", {}) if existing.data else {}
-
-                if knowledge_type is not None:
-                    metadata["knowledge_type"] = knowledge_type
-                if tags is not None:
-                    metadata["tags"] = tags
-
-                update_data["metadata"] = metadata
-
-            if not update_data:
-                return False, {"error": "No update data provided"}
-
-            # Update the source
-            response = (
-                self.supabase_client.table("archon_sources")
-                .update(update_data)
-                .eq("source_id", source_id)
-                .execute()
-            )
-
-            if response.data:
-                return True, {"source_id": source_id, "updated_fields": list(update_data.keys())}
             else:
-                return False, {"error": f"Source with ID {source_id} not found"}
+                return self._update_source_metadata_supabase(
+                    source_id, title, summary, word_count, knowledge_type, tags
+                )
 
         except Exception as e:
             logger.error(f"Error updating source metadata: {e}")
             return False, {"error": f"Error updating source metadata: {str(e)}"}
+
+    async def _update_source_metadata_asyncpg(
+        self,
+        source_id: str,
+        title: str = None,
+        summary: str = None,
+        word_count: int = None,
+        knowledge_type: str = None,
+        tags: list[str] = None,
+    ) -> tuple[bool, dict[str, Any]]:
+        """Update source metadata using asyncpg."""
+        from .database import AsyncPGClient
+
+        # Build update data
+        update_data = {}
+        if title is not None:
+            update_data["title"] = title
+        if summary is not None:
+            update_data["summary"] = summary
+        if word_count is not None:
+            update_data["total_word_count"] = word_count
+
+        # Handle metadata fields
+        if knowledge_type is not None or tags is not None:
+            # Get existing metadata
+            row = await AsyncPGClient.fetchrow(
+                "SELECT metadata FROM archon_sources WHERE source_id = $1",
+                source_id
+            )
+            metadata = row["metadata"] if row and row["metadata"] else {}
+            if isinstance(metadata, str):
+                metadata = json.loads(metadata)
+
+            if knowledge_type is not None:
+                metadata["knowledge_type"] = knowledge_type
+            if tags is not None:
+                metadata["tags"] = tags
+
+            update_data["metadata"] = metadata
+
+        if not update_data:
+            return False, {"error": "No update data provided"}
+
+        # Build SET clause dynamically
+        set_clauses = []
+        params = []
+        param_idx = 1
+
+        for field, value in update_data.items():
+            if field == "metadata":
+                set_clauses.append(f"{field} = ${param_idx}::jsonb")
+                params.append(json.dumps(value))
+            else:
+                set_clauses.append(f"{field} = ${param_idx}")
+                params.append(value)
+            param_idx += 1
+
+        params.append(source_id)
+
+        result = await AsyncPGClient.execute(
+            f"""
+            UPDATE archon_sources
+            SET {', '.join(set_clauses)}
+            WHERE source_id = ${param_idx}
+            """,
+            *params
+        )
+
+        if result and "UPDATE" in result:
+            return True, {"source_id": source_id, "updated_fields": list(update_data.keys())}
+        else:
+            return False, {"error": f"Source with ID {source_id} not found"}
+
+    def _update_source_metadata_supabase(
+        self,
+        source_id: str,
+        title: str = None,
+        summary: str = None,
+        word_count: int = None,
+        knowledge_type: str = None,
+        tags: list[str] = None,
+    ) -> tuple[bool, dict[str, Any]]:
+        """Update source metadata using Supabase (legacy)."""
+        # Build update data
+        update_data = {}
+        if title is not None:
+            update_data["title"] = title
+        if summary is not None:
+            update_data["summary"] = summary
+        if word_count is not None:
+            update_data["total_word_count"] = word_count
+
+        # Handle metadata fields
+        if knowledge_type is not None or tags is not None:
+            # Get existing metadata
+            existing = (
+                self.supabase_client.table("archon_sources")
+                .select("metadata")
+                .eq("source_id", source_id)
+                .execute()
+            )
+            metadata = existing.data[0].get("metadata", {}) if existing.data else {}
+
+            if knowledge_type is not None:
+                metadata["knowledge_type"] = knowledge_type
+            if tags is not None:
+                metadata["tags"] = tags
+
+            update_data["metadata"] = metadata
+
+        if not update_data:
+            return False, {"error": "No update data provided"}
+
+        # Update the source
+        response = (
+            self.supabase_client.table("archon_sources")
+            .update(update_data)
+            .eq("source_id", source_id)
+            .execute()
+        )
+
+        if response.data:
+            return True, {"source_id": source_id, "updated_fields": list(update_data.keys())}
+        else:
+            return False, {"error": f"Source with ID {source_id} not found"}
 
     async def create_source_info(
         self,
@@ -562,7 +720,7 @@ class SourceManagementService:
             logger.error(f"Error creating source info: {e}")
             return False, {"error": f"Error creating source info: {str(e)}"}
 
-    def get_source_details(self, source_id: str) -> tuple[bool, dict[str, Any]]:
+    async def get_source_details(self, source_id: str) -> tuple[bool, dict[str, Any]]:
         """
         Get detailed information about a specific source.
 
@@ -573,48 +731,95 @@ class SourceManagementService:
             Tuple of (success, result_dict)
         """
         try:
-            # Get source metadata
-            source_response = (
-                self.supabase_client.table("archon_sources")
-                .select("*")
-                .eq("source_id", source_id)
-                .execute()
-            )
-
-            if not source_response.data:
-                return False, {"error": f"Source with ID {source_id} not found"}
-
-            source_data = source_response.data[0]
-
-            # Get page count
-            pages_response = (
-                self.supabase_client.table("archon_crawled_pages")
-                .select("id")
-                .eq("source_id", source_id)
-                .execute()
-            )
-            page_count = len(pages_response.data) if pages_response.data else 0
-
-            # Get code example count
-            code_response = (
-                self.supabase_client.table("archon_code_examples")
-                .select("id")
-                .eq("source_id", source_id)
-                .execute()
-            )
-            code_count = len(code_response.data) if code_response.data else 0
-
-            return True, {
-                "source": source_data,
-                "page_count": page_count,
-                "code_example_count": code_count,
-            }
+            if is_asyncpg_mode():
+                return await self._get_source_details_asyncpg(source_id)
+            else:
+                return self._get_source_details_supabase(source_id)
 
         except Exception as e:
             logger.error(f"Error getting source details: {e}")
             return False, {"error": f"Error getting source details: {str(e)}"}
 
-    def list_sources_by_type(self, knowledge_type: str = None) -> tuple[bool, dict[str, Any]]:
+    async def _get_source_details_asyncpg(self, source_id: str) -> tuple[bool, dict[str, Any]]:
+        """Get source details using asyncpg."""
+        from .database import AsyncPGClient
+
+        # Get source metadata
+        source_row = await AsyncPGClient.fetchrow(
+            "SELECT * FROM archon_sources WHERE source_id = $1",
+            source_id
+        )
+
+        if not source_row:
+            return False, {"error": f"Source with ID {source_id} not found"}
+
+        source_data = dict(source_row)
+        # Convert timestamps to strings
+        if source_data.get("created_at"):
+            source_data["created_at"] = str(source_data["created_at"])
+        if source_data.get("updated_at"):
+            source_data["updated_at"] = str(source_data["updated_at"])
+        if isinstance(source_data.get("metadata"), str):
+            source_data["metadata"] = json.loads(source_data["metadata"])
+
+        # Get page count
+        page_count = await AsyncPGClient.fetchval(
+            "SELECT COUNT(*) FROM archon_crawled_pages WHERE source_id = $1",
+            source_id
+        )
+
+        # Get code example count
+        code_count = await AsyncPGClient.fetchval(
+            "SELECT COUNT(*) FROM archon_code_examples WHERE source_id = $1",
+            source_id
+        )
+
+        return True, {
+            "source": source_data,
+            "page_count": page_count or 0,
+            "code_example_count": code_count or 0,
+        }
+
+    def _get_source_details_supabase(self, source_id: str) -> tuple[bool, dict[str, Any]]:
+        """Get source details using Supabase (legacy)."""
+        # Get source metadata
+        source_response = (
+            self.supabase_client.table("archon_sources")
+            .select("*")
+            .eq("source_id", source_id)
+            .execute()
+        )
+
+        if not source_response.data:
+            return False, {"error": f"Source with ID {source_id} not found"}
+
+        source_data = source_response.data[0]
+
+        # Get page count
+        pages_response = (
+            self.supabase_client.table("archon_crawled_pages")
+            .select("id")
+            .eq("source_id", source_id)
+            .execute()
+        )
+        page_count = len(pages_response.data) if pages_response.data else 0
+
+        # Get code example count
+        code_response = (
+            self.supabase_client.table("archon_code_examples")
+            .select("id")
+            .eq("source_id", source_id)
+            .execute()
+        )
+        code_count = len(code_response.data) if code_response.data else 0
+
+        return True, {
+            "source": source_data,
+            "page_count": page_count,
+            "code_example_count": code_count,
+        }
+
+    async def list_sources_by_type(self, knowledge_type: str = None) -> tuple[bool, dict[str, Any]]:
         """
         List sources filtered by knowledge type.
 
@@ -625,34 +830,77 @@ class SourceManagementService:
             Tuple of (success, result_dict)
         """
         try:
-            query = self.supabase_client.table("archon_sources").select("*")
-
-            if knowledge_type:
-                # Filter by metadata->knowledge_type
-                query = query.contains("metadata", {"knowledge_type": knowledge_type})
-
-            response = query.execute()
-
-            sources = []
-            for row in response.data:
-                metadata = row.get("metadata", {})
-                sources.append({
-                    "source_id": row["source_id"],
-                    "title": row.get("title", ""),
-                    "summary": row.get("summary", ""),
-                    "knowledge_type": metadata.get("knowledge_type", ""),
-                    "tags": metadata.get("tags", []),
-                    "total_word_count": row.get("total_word_count", 0),
-                    "created_at": row.get("created_at", ""),
-                    "updated_at": row.get("updated_at", ""),
-                })
-
-            return True, {
-                "sources": sources,
-                "total_count": len(sources),
-                "knowledge_type_filter": knowledge_type,
-            }
+            if is_asyncpg_mode():
+                return await self._list_sources_by_type_asyncpg(knowledge_type)
+            else:
+                return self._list_sources_by_type_supabase(knowledge_type)
 
         except Exception as e:
             logger.error(f"Error listing sources by type: {e}")
             return False, {"error": f"Error listing sources by type: {str(e)}"}
+
+    async def _list_sources_by_type_asyncpg(self, knowledge_type: str = None) -> tuple[bool, dict[str, Any]]:
+        """List sources by type using asyncpg."""
+        from .database import AsyncPGClient
+
+        if knowledge_type:
+            rows = await AsyncPGClient.fetch(
+                "SELECT * FROM archon_sources WHERE metadata->>'knowledge_type' = $1",
+                knowledge_type
+            )
+        else:
+            rows = await AsyncPGClient.fetch(
+                "SELECT * FROM archon_sources"
+            )
+
+        sources = []
+        for row in rows:
+            metadata = row.get("metadata", {})
+            if isinstance(metadata, str):
+                metadata = json.loads(metadata)
+            sources.append({
+                "source_id": row["source_id"],
+                "title": row.get("title", ""),
+                "summary": row.get("summary", ""),
+                "knowledge_type": metadata.get("knowledge_type", ""),
+                "tags": metadata.get("tags", []),
+                "total_word_count": row.get("total_word_count", 0),
+                "created_at": str(row.get("created_at", "")) if row.get("created_at") else "",
+                "updated_at": str(row.get("updated_at", "")) if row.get("updated_at") else "",
+            })
+
+        return True, {
+            "sources": sources,
+            "total_count": len(sources),
+            "knowledge_type_filter": knowledge_type,
+        }
+
+    def _list_sources_by_type_supabase(self, knowledge_type: str = None) -> tuple[bool, dict[str, Any]]:
+        """List sources by type using Supabase (legacy)."""
+        query = self.supabase_client.table("archon_sources").select("*")
+
+        if knowledge_type:
+            # Filter by metadata->knowledge_type
+            query = query.contains("metadata", {"knowledge_type": knowledge_type})
+
+        response = query.execute()
+
+        sources = []
+        for row in response.data:
+            metadata = row.get("metadata", {})
+            sources.append({
+                "source_id": row["source_id"],
+                "title": row.get("title", ""),
+                "summary": row.get("summary", ""),
+                "knowledge_type": metadata.get("knowledge_type", ""),
+                "tags": metadata.get("tags", []),
+                "total_word_count": row.get("total_word_count", 0),
+                "created_at": row.get("created_at", ""),
+                "updated_at": row.get("updated_at", ""),
+            })
+
+        return True, {
+            "sources": sources,
+            "total_count": len(sources),
+            "knowledge_type_filter": knowledge_type,
+        }

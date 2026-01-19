@@ -20,12 +20,19 @@ class ConfigurationError(Exception):
 class EnvironmentConfig:
     """Configuration loaded from environment variables."""
 
-    supabase_url: str
-    supabase_service_key: str
-    port: int  # Required - no default
+    # Database connection - supports both DATABASE_URL (asyncpg) and Supabase (legacy)
+    database_url: str | None = None
+    supabase_url: str | None = None
+    supabase_service_key: str | None = None
+    port: int = 8181  # Default port for Archon API
     openai_api_key: str | None = None
     host: str = "0.0.0.0"
     transport: str = "sse"
+
+    @property
+    def use_asyncpg(self) -> bool:
+        """Check if using asyncpg (DATABASE_URL) instead of Supabase."""
+        return self.database_url is not None
 
 
 @dataclass
@@ -166,64 +173,79 @@ def validate_supabase_url(url: str) -> bool:
 
 
 def load_environment_config() -> EnvironmentConfig:
-    """Load and validate environment configuration."""
+    """Load and validate environment configuration.
+
+    Supports two database backends:
+    1. asyncpg (PostgreSQL) via DATABASE_URL - preferred for K8s deployment
+    2. Supabase via SUPABASE_URL + SUPABASE_SERVICE_KEY - legacy support
+
+    DATABASE_URL takes precedence if set.
+    """
     # OpenAI API key is optional at startup - can be set via API
     openai_api_key = os.getenv("OPENAI_API_KEY")
 
-    # Required environment variables for database access
+    # Check for DATABASE_URL first (asyncpg mode - preferred for K8s)
+    database_url = os.getenv("DATABASE_URL")
+
+    # Fallback to Supabase if DATABASE_URL not set
     supabase_url = os.getenv("SUPABASE_URL")
-    if not supabase_url:
-        raise ConfigurationError("SUPABASE_URL environment variable is required")
-
     supabase_service_key = os.getenv("SUPABASE_SERVICE_KEY")
-    if not supabase_service_key:
-        raise ConfigurationError("SUPABASE_SERVICE_KEY environment variable is required")
 
-    # Validate required fields
+    # Validate database configuration
+    if database_url:
+        # Using asyncpg mode - validate DATABASE_URL format
+        if not database_url.startswith(("postgresql://", "postgres://")):
+            raise ConfigurationError(
+                "DATABASE_URL must be a valid PostgreSQL connection string, "
+                "e.g.: postgresql://user:password@host:5432/database"
+            )
+    elif supabase_url and supabase_service_key:
+        # Using Supabase mode - validate Supabase config
+        if openai_api_key:
+            validate_openai_api_key(openai_api_key)
+        validate_supabase_url(supabase_url)
+
+        # Validate Supabase key type
+        is_valid_key, key_message = validate_supabase_key(supabase_service_key)
+        if not is_valid_key:
+            if key_message == "ANON_KEY_DETECTED":
+                raise ConfigurationError(
+                    "CRITICAL: You are using a Supabase ANON key instead of a SERVICE key.\n\n"
+                    "The ANON key is a public key with read-only permissions that cannot write to the database.\n"
+                    "This will cause all database operations to fail with 'permission denied' errors.\n\n"
+                    "To fix this:\n"
+                    "1. Go to your Supabase project dashboard\n"
+                    "2. Navigate to Settings > API keys\n"
+                    "3. Find the 'service_role' key (NOT the 'anon' key)\n"
+                    "4. Update your SUPABASE_SERVICE_KEY environment variable\n\n"
+                    "Key characteristics:\n"
+                    "- ANON key: Starts with 'eyJ...' and has role='anon' (public, read-only)\n"
+                    "- SERVICE key: Starts with 'eyJ...' and has role='service_role' (private, full access)\n\n"
+                    "Current key role detected: anon"
+                )
+            elif key_message.startswith("UNKNOWN_KEY_TYPE:"):
+                role = key_message.split(":", 1)[1]
+                raise ConfigurationError(
+                    f"CRITICAL: Unknown Supabase key role '{role}'.\n\n"
+                    f"Expected 'service_role' but found '{role}'.\n"
+                    f"This key type is not supported and will likely cause failures.\n\n"
+                    f"Please use a valid service_role key from your Supabase dashboard."
+                )
+            # For UNABLE_TO_VALIDATE, we continue silently
+    else:
+        raise ConfigurationError(
+            "Database configuration required. Set one of:\n"
+            "  - DATABASE_URL: PostgreSQL connection string (preferred for K8s)\n"
+            "  - SUPABASE_URL + SUPABASE_SERVICE_KEY: Supabase credentials (legacy)"
+        )
+
+    # Validate OpenAI key if present
     if openai_api_key:
         validate_openai_api_key(openai_api_key)
-    validate_supabase_url(supabase_url)
-
-    # Validate Supabase key type
-    is_valid_key, key_message = validate_supabase_key(supabase_service_key)
-    if not is_valid_key:
-        if key_message == "ANON_KEY_DETECTED":
-            raise ConfigurationError(
-                "CRITICAL: You are using a Supabase ANON key instead of a SERVICE key.\n\n"
-                "The ANON key is a public key with read-only permissions that cannot write to the database.\n"
-                "This will cause all database operations to fail with 'permission denied' errors.\n\n"
-                "To fix this:\n"
-                "1. Go to your Supabase project dashboard\n"
-                "2. Navigate to Settings > API keys\n"
-                "3. Find the 'service_role' key (NOT the 'anon' key)\n"
-                "4. Update your SUPABASE_SERVICE_KEY environment variable\n\n"
-                "Key characteristics:\n"
-                "- ANON key: Starts with 'eyJ...' and has role='anon' (public, read-only)\n"
-                "- SERVICE key: Starts with 'eyJ...' and has role='service_role' (private, full access)\n\n"
-                "Current key role detected: anon"
-            )
-        elif key_message.startswith("UNKNOWN_KEY_TYPE:"):
-            role = key_message.split(":", 1)[1]
-            raise ConfigurationError(
-                f"CRITICAL: Unknown Supabase key role '{role}'.\n\n"
-                f"Expected 'service_role' but found '{role}'.\n"
-                f"This key type is not supported and will likely cause failures.\n\n"
-                f"Please use a valid service_role key from your Supabase dashboard."
-            )
-        # For UNABLE_TO_VALIDATE, we continue silently
 
     # Optional environment variables with defaults
     host = os.getenv("HOST", "0.0.0.0")
-    port_str = os.getenv("PORT")
-    if not port_str:
-        # This appears to be for MCP configuration based on default 8051
-        port_str = os.getenv("ARCHON_MCP_PORT")
-        if not port_str:
-            raise ConfigurationError(
-                "PORT or ARCHON_MCP_PORT environment variable is required. "
-                "Please set it in your .env file or environment. "
-                "Default value: 8051"
-            )
+    port_str = os.getenv("PORT", "8181")  # Default to 8181 for Archon API
     transport = os.getenv("TRANSPORT", "sse")
 
     # Validate and convert port
@@ -233,6 +255,7 @@ def load_environment_config() -> EnvironmentConfig:
         raise ConfigurationError(f"PORT must be a valid integer, got: {port_str}") from e
 
     return EnvironmentConfig(
+        database_url=database_url,
         openai_api_key=openai_api_key,
         supabase_url=supabase_url,
         supabase_service_key=supabase_service_key,

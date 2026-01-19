@@ -3,13 +3,17 @@ Document Storage Operations
 
 Handles the storage and processing of crawled documents.
 Extracted from crawl_orchestration_service.py for better modularity.
+
+Supports both asyncpg (K8s) and Supabase (legacy) database backends.
 """
 
 import asyncio
+import json
 from collections.abc import Callable
 from typing import Any
 
 from ...config.logfire_config import get_logger, safe_logfire_error, safe_logfire_info
+from ..client_manager import get_database_mode, is_asyncpg_mode
 from ..source_management_service import extract_source_summary, update_source_info
 from ..storage.document_storage_service import add_documents_to_supabase
 from ..storage.storage_services import DocumentStorageService
@@ -21,18 +25,31 @@ logger = get_logger(__name__)
 class DocumentStorageOperations:
     """
     Handles document storage operations for crawled content.
+
+    Supports both asyncpg (K8s) and Supabase (legacy) database backends.
     """
 
-    def __init__(self, supabase_client):
+    def __init__(self, supabase_client=None):
         """
         Initialize document storage operations.
 
         Args:
-            supabase_client: The Supabase client for database operations
+            supabase_client: The Supabase client for database operations (legacy mode only)
         """
-        self.supabase_client = supabase_client
+        self._supabase_client = supabase_client
+        self._mode = get_database_mode()
         self.doc_storage_service = DocumentStorageService(supabase_client)
         self.code_extraction_service = CodeExtractionService(supabase_client)
+
+    @property
+    def supabase_client(self):
+        """Lazy load Supabase client for legacy mode."""
+        if self._mode != "supabase":
+            raise ValueError("Supabase client not available in asyncpg mode")
+        if self._supabase_client is None:
+            from src.server.utils import get_supabase_client
+            self._supabase_client = get_supabase_client()
+        return self._supabase_client
 
     async def process_and_store_documents(
         self,
@@ -380,27 +397,53 @@ class DocumentStorageOperations:
                 # Try a simpler approach with minimal data
                 try:
                     safe_logfire_info(f"Attempting fallback source creation for '{source_id}'")
-                    fallback_data = {
-                        "source_id": source_id,
-                        "title": source_id,  # Use source_id as title fallback
-                        "summary": summary,
-                        "total_word_count": source_id_word_counts[source_id],
-                        "metadata": {
-                            "knowledge_type": request.get("knowledge_type", "documentation"),
-                            "tags": request.get("tags", []),
-                            "auto_generated": True,
-                            "fallback_creation": True,
-                            "original_url": request.get("url"),
-                        },
+                    fallback_metadata = {
+                        "knowledge_type": request.get("knowledge_type", "documentation"),
+                        "tags": request.get("tags", []),
+                        "auto_generated": True,
+                        "fallback_creation": True,
+                        "original_url": request.get("url"),
                     }
 
-                    # Add new fields if provided
-                    if source_url:
-                        fallback_data["source_url"] = source_url
-                    if source_display_name:
-                        fallback_data["source_display_name"] = source_display_name
+                    if is_asyncpg_mode():
+                        from ..database import AsyncPGClient
+                        await AsyncPGClient.execute(
+                            """
+                            INSERT INTO archon_sources (source_id, title, summary, total_word_count, metadata, source_url, source_display_name)
+                            VALUES ($1, $2, $3, $4, $5::jsonb, $6, $7)
+                            ON CONFLICT (source_id) DO UPDATE SET
+                                title = EXCLUDED.title,
+                                summary = EXCLUDED.summary,
+                                total_word_count = EXCLUDED.total_word_count,
+                                metadata = EXCLUDED.metadata,
+                                source_url = EXCLUDED.source_url,
+                                source_display_name = EXCLUDED.source_display_name,
+                                updated_at = NOW()
+                            """,
+                            source_id,
+                            source_id,  # title fallback
+                            summary,
+                            source_id_word_counts[source_id],
+                            json.dumps(fallback_metadata),
+                            source_url,
+                            source_display_name,
+                        )
+                    else:
+                        fallback_data = {
+                            "source_id": source_id,
+                            "title": source_id,  # Use source_id as title fallback
+                            "summary": summary,
+                            "total_word_count": source_id_word_counts[source_id],
+                            "metadata": fallback_metadata,
+                        }
 
-                    self.supabase_client.table("archon_sources").upsert(fallback_data).execute()
+                        # Add new fields if provided
+                        if source_url:
+                            fallback_data["source_url"] = source_url
+                        if source_display_name:
+                            fallback_data["source_display_name"] = source_display_name
+
+                        self.supabase_client.table("archon_sources").upsert(fallback_data).execute()
                     safe_logfire_info(f"Fallback source creation succeeded for '{source_id}'")
                 except Exception as fallback_error:
                     logger.error(f"Both source creation attempts failed for '{source_id}'", exc_info=True)
@@ -415,16 +458,27 @@ class DocumentStorageOperations:
         if unique_source_ids:
             for source_id in unique_source_ids:
                 try:
-                    source_check = (
-                        self.supabase_client.table("archon_sources")
-                        .select("source_id")
-                        .eq("source_id", source_id)
-                        .execute()
-                    )
-                    if not source_check.data:
-                        raise Exception(
-                            f"Source record verification failed - '{source_id}' does not exist in sources table"
+                    if is_asyncpg_mode():
+                        from ..database import AsyncPGClient
+                        source_exists = await AsyncPGClient.fetchval(
+                            "SELECT source_id FROM archon_sources WHERE source_id = $1",
+                            source_id,
                         )
+                        if not source_exists:
+                            raise Exception(
+                                f"Source record verification failed - '{source_id}' does not exist in sources table"
+                            )
+                    else:
+                        source_check = (
+                            self.supabase_client.table("archon_sources")
+                            .select("source_id")
+                            .eq("source_id", source_id)
+                            .execute()
+                        )
+                        if not source_check.data:
+                            raise Exception(
+                                f"Source record verification failed - '{source_id}' does not exist in sources table"
+                            )
                     safe_logfire_info(f"Source record verified for '{source_id}'")
                 except Exception as e:
                     logger.error(f"Source verification failed for '{source_id}'", exc_info=True)

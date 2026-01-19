@@ -2,6 +2,8 @@
 Code Storage Service
 
 Handles extraction and storage of code examples from documents.
+
+Supports both asyncpg (K8s) and Supabase (legacy) database backends.
 """
 
 import asyncio
@@ -18,6 +20,7 @@ from urllib.parse import urlparse
 from supabase import Client
 
 from ...config.logfire_config import search_logger
+from ..client_manager import get_database_mode, is_asyncpg_mode
 from ..credential_service import credential_service
 from ..embeddings.contextual_embedding_service import generate_contextual_embeddings_batch
 from ..embeddings.embedding_service import create_embeddings_batch
@@ -1142,10 +1145,12 @@ async def add_code_examples_to_supabase(
     embedding_provider: str | None = None,
 ):
     """
-    Add code examples to the Supabase code_examples table in batches.
+    Add code examples to the archon_code_examples table in batches.
+
+    Supports both asyncpg (K8s) and Supabase (legacy) database backends.
 
     Args:
-        client: Supabase client
+        client: Supabase client (may be None in asyncpg mode)
         urls: List of URLs
         chunk_numbers: List of chunk numbers
         code_examples: List of code example contents
@@ -1162,11 +1167,22 @@ async def add_code_examples_to_supabase(
 
     # Delete existing records for these URLs
     unique_urls = list(set(urls))
-    for url in unique_urls:
-        try:
-            client.table("archon_code_examples").delete().eq("url", url).execute()
-        except Exception as e:
-            search_logger.error(f"Error deleting existing code examples for {url}: {e}")
+    if is_asyncpg_mode():
+        from ..database import AsyncPGClient
+        for url in unique_urls:
+            try:
+                await AsyncPGClient.execute(
+                    "DELETE FROM archon_code_examples WHERE url = $1",
+                    url
+                )
+            except Exception as e:
+                search_logger.error(f"Error deleting existing code examples for {url}: {e}")
+    else:
+        for url in unique_urls:
+            try:
+                client.table("archon_code_examples").delete().eq("url", url).execute()
+            except Exception as e:
+                search_logger.error(f"Error deleting existing code examples for {url}: {e}")
 
     # Check if contextual embeddings are enabled (use proper async method like document storage)
     try:
@@ -1339,19 +1355,52 @@ async def add_code_examples_to_supabase(
             search_logger.warning("No records to insert for this batch; skipping insert.")
             continue
 
-        # Insert batch into Supabase with retry logic
+        # Insert batch with retry logic
         max_retries = 3
         retry_delay = 1.0
 
         for retry in range(max_retries):
             try:
-                client.table("archon_code_examples").insert(batch_data).execute()
+                if is_asyncpg_mode():
+                    # asyncpg mode - insert records individually with parameterized queries
+                    from ..database import AsyncPGClient
+                    for record in batch_data:
+                        # Determine which embedding column to use
+                        embedding_col = None
+                        embedding_val = None
+                        for col in ["embedding_768", "embedding_1024", "embedding_1536", "embedding_3072"]:
+                            if col in record:
+                                embedding_col = col
+                                embedding_val = record[col]
+                                break
+
+                        await AsyncPGClient.execute(
+                            f"""
+                            INSERT INTO archon_code_examples
+                            (url, chunk_number, content, summary, metadata, source_id,
+                             {embedding_col}, llm_chat_model, embedding_model, embedding_dimension)
+                            VALUES ($1, $2, $3, $4, $5::jsonb, $6, $7, $8, $9, $10)
+                            """,
+                            record["url"],
+                            record["chunk_number"],
+                            record["content"],
+                            record["summary"],
+                            json.dumps(record["metadata"]),
+                            record["source_id"],
+                            embedding_val,
+                            record.get("llm_chat_model"),
+                            record.get("embedding_model"),
+                            record.get("embedding_dimension"),
+                        )
+                else:
+                    # Supabase mode - batch insert
+                    client.table("archon_code_examples").insert(batch_data).execute()
                 # Success - break out of retry loop
                 break
             except Exception as e:
                 if retry < max_retries - 1:
                     search_logger.warning(
-                        f"Error inserting batch into Supabase (attempt {retry + 1}/{max_retries}): {e}"
+                        f"Error inserting batch (attempt {retry + 1}/{max_retries}): {e}"
                     )
                     search_logger.info(f"Retrying in {retry_delay} seconds...")
                     await asyncio.sleep(retry_delay)
@@ -1364,7 +1413,37 @@ async def add_code_examples_to_supabase(
                     successful_inserts = 0
                     for record in batch_data:
                         try:
-                            client.table("archon_code_examples").insert(record).execute()
+                            if is_asyncpg_mode():
+                                from ..database import AsyncPGClient
+                                # Determine which embedding column to use
+                                embedding_col = None
+                                embedding_val = None
+                                for col in ["embedding_768", "embedding_1024", "embedding_1536", "embedding_3072"]:
+                                    if col in record:
+                                        embedding_col = col
+                                        embedding_val = record[col]
+                                        break
+
+                                await AsyncPGClient.execute(
+                                    f"""
+                                    INSERT INTO archon_code_examples
+                                    (url, chunk_number, content, summary, metadata, source_id,
+                                     {embedding_col}, llm_chat_model, embedding_model, embedding_dimension)
+                                    VALUES ($1, $2, $3, $4, $5::jsonb, $6, $7, $8, $9, $10)
+                                    """,
+                                    record["url"],
+                                    record["chunk_number"],
+                                    record["content"],
+                                    record["summary"],
+                                    json.dumps(record["metadata"]),
+                                    record["source_id"],
+                                    embedding_val,
+                                    record.get("llm_chat_model"),
+                                    record.get("embedding_model"),
+                                    record.get("embedding_dimension"),
+                                )
+                            else:
+                                client.table("archon_code_examples").insert(record).execute()
                             successful_inserts += 1
                         except Exception as individual_error:
                             search_logger.error(

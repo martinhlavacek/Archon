@@ -10,13 +10,14 @@ Key features:
 - Specialized embedding strategies for code content
 - Code example extraction and retrieval
 - Programming language and framework-aware search
+
+Supports both asyncpg (K8s) and Supabase (legacy) database backends.
 """
 
 from typing import Any
 
-from supabase import Client
-
 from ...config.logfire_config import get_logger, safe_span
+from ..client_manager import get_database_mode
 from ..embeddings.embedding_service import create_embedding
 
 logger = get_logger(__name__)
@@ -25,16 +26,27 @@ logger = get_logger(__name__)
 class AgenticRAGStrategy:
     """Strategy class implementing agentic RAG for code example search and extraction"""
 
-    def __init__(self, supabase_client: Client, base_strategy):
+    def __init__(self, supabase_client=None, base_strategy=None):
         """
         Initialize agentic RAG strategy.
 
         Args:
-            supabase_client: Supabase client for database operations
+            supabase_client: Supabase client for database operations (legacy mode only)
             base_strategy: Base strategy for vector search
         """
-        self.supabase_client = supabase_client
+        self._supabase_client = supabase_client
         self.base_strategy = base_strategy
+        self._mode = get_database_mode()
+
+    @property
+    def supabase_client(self):
+        """Lazy load Supabase client for legacy mode."""
+        if self._mode != "supabase":
+            raise ValueError("Supabase client not available in asyncpg mode")
+        if self._supabase_client is None:
+            from src.server.utils import get_supabase_client
+            self._supabase_client = get_supabase_client()
+        return self._supabase_client
 
     def is_enabled(self) -> bool:
         """Check if agentic RAG is enabled via configuration."""
@@ -365,13 +377,13 @@ class AgenticRAGStrategy:
 
 
 # Utility functions for standalone usage
-def create_agentic_rag_strategy(supabase_client: Client) -> AgenticRAGStrategy:
+def create_agentic_rag_strategy(supabase_client=None) -> AgenticRAGStrategy:
     """Create an agentic RAG strategy instance."""
     return AgenticRAGStrategy(supabase_client)
 
 
 async def search_code_examples_agentic(
-    client: Client,
+    client,
     query: str,
     match_count: int = 10,
     filter_metadata: dict[str, Any] | None = None,
@@ -381,7 +393,7 @@ async def search_code_examples_agentic(
     Standalone function for agentic code example search.
 
     Args:
-        client: Supabase client
+        client: Database client (Supabase for legacy, None for asyncpg)
         query: Search query
         match_count: Number of results to return
         filter_metadata: Optional metadata filter
@@ -391,7 +403,7 @@ async def search_code_examples_agentic(
         List of code example results
     """
     strategy = AgenticRAGStrategy(client)
-    return await strategy.search_code_examples_async(query, match_count, filter_metadata, source_id)
+    return await strategy.search_code_examples(query, match_count, filter_metadata, source_id)
 
 
 def analyze_query_for_code_search(query: str) -> dict[str, Any]:

@@ -1,0 +1,190 @@
+name: Docker Build and Publish
+
+# Build and push Docker images to GHCR
+# Triggers on:
+# - Push to main branch (for release images)
+# - Manual dispatch (for testing or ad-hoc builds)
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'python/**'
+      - 'archon-ui-main/**'
+      - '.github/workflows/docker-publish.yml'
+  workflow_dispatch:
+    inputs:
+      build_api:
+        description: 'Build Archon API'
+        type: boolean
+        default: true
+      build_ui:
+        description: 'Build Archon UI'
+        type: boolean
+        default: true
+      tag:
+        description: 'Image tag (default: short SHA)'
+        type: string
+        default: ''
+
+env:
+  REGISTRY: ghcr.io
+  ARCHON_API_IMAGE: ghcr.io/${{ github.repository_owner }}/archon-api
+  ARCHON_UI_IMAGE: ghcr.io/${{ github.repository_owner }}/archon-ui
+
+jobs:
+  # Determine what to build and what tag to use
+  prepare:
+    runs-on: ubuntu-latest
+    outputs:
+      build_api: ${{ steps.check.outputs.build_api }}
+      build_ui: ${{ steps.check.outputs.build_ui }}
+      image_tag: ${{ steps.tag.outputs.tag }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
+
+      - name: Check what changed
+        id: check
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "build_api=${{ inputs.build_api }}" >> $GITHUB_OUTPUT
+            echo "build_ui=${{ inputs.build_ui }}" >> $GITHUB_OUTPUT
+          else
+            # Check for changes in paths
+            CHANGED_FILES=$(git diff --name-only HEAD^ HEAD)
+
+            if echo "$CHANGED_FILES" | grep -q "^python/"; then
+              echo "build_api=true" >> $GITHUB_OUTPUT
+            else
+              echo "build_api=false" >> $GITHUB_OUTPUT
+            fi
+
+            if echo "$CHANGED_FILES" | grep -q "^archon-ui-main/"; then
+              echo "build_ui=true" >> $GITHUB_OUTPUT
+            else
+              echo "build_ui=false" >> $GITHUB_OUTPUT
+            fi
+          fi
+
+      - name: Determine image tag
+        id: tag
+        run: |
+          if [ -n "${{ inputs.tag }}" ]; then
+            echo "tag=${{ inputs.tag }}" >> $GITHUB_OUTPUT
+          else
+            echo "tag=$(echo ${{ github.sha }} | cut -c1-7)" >> $GITHUB_OUTPUT
+          fi
+
+  # Build and push Archon API
+  build-api:
+    needs: [prepare]
+    runs-on: ubuntu-latest
+    if: needs.prepare.outputs.build_api == 'true'
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.ARCHON_API_IMAGE }}
+          tags: |
+            type=raw,value=${{ needs.prepare.outputs.image_tag }}
+            type=raw,value=latest,enable={{is_default_branch}}
+
+      - name: Build and push Archon API
+        uses: docker/build-push-action@v5
+        with:
+          context: ./python
+          file: ./python/Dockerfile.server
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          build-args: |
+            ARCHON_SERVER_PORT=8181
+
+  # Build and push Archon UI
+  build-ui:
+    needs: [prepare]
+    runs-on: ubuntu-latest
+    if: needs.prepare.outputs.build_ui == 'true'
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.ARCHON_UI_IMAGE }}
+          tags: |
+            type=raw,value=${{ needs.prepare.outputs.image_tag }}
+            type=raw,value=latest,enable={{is_default_branch}}
+
+      - name: Build and push Archon UI
+        uses: docker/build-push-action@v5
+        with:
+          context: ./archon-ui-main
+          file: ./archon-ui-main/Dockerfile.prod
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  # Summary
+  summary:
+    needs: [prepare, build-api, build-ui]
+    runs-on: ubuntu-latest
+    if: always()
+    steps:
+      - name: Summary
+        run: |
+          echo "## Docker Build and Publish" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Tag:** \`${{ needs.prepare.outputs.image_tag }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "| Image | Built | Status |" >> $GITHUB_STEP_SUMMARY
+          echo "|-------|-------|--------|" >> $GITHUB_STEP_SUMMARY
+          echo "| archon-api | ${{ needs.prepare.outputs.build_api }} | ${{ needs.build-api.result || 'skipped' }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| archon-ui | ${{ needs.prepare.outputs.build_ui }} | ${{ needs.build-ui.result || 'skipped' }} |" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### Images" >> $GITHUB_STEP_SUMMARY
+          if [ "${{ needs.prepare.outputs.build_api }}" = "true" ]; then
+            echo "- \`${{ env.ARCHON_API_IMAGE }}:${{ needs.prepare.outputs.image_tag }}\`" >> $GITHUB_STEP_SUMMARY
+          fi
+          if [ "${{ needs.prepare.outputs.build_ui }}" = "true" ]; then
+            echo "- \`${{ env.ARCHON_UI_IMAGE }}:${{ needs.prepare.outputs.image_tag }}\`" >> $GITHUB_STEP_SUMMARY
+          fi

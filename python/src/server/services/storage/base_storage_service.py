@@ -6,6 +6,8 @@ Provides common functionality for all document storage operations including:
 - Metadata extraction
 - Batch processing
 - Progress reporting
+
+Supports both asyncpg (K8s) and Supabase (legacy) database backends.
 """
 
 import re
@@ -15,26 +17,35 @@ from typing import Any
 from urllib.parse import urlparse
 
 from ...config.logfire_config import get_logger, safe_span
+from ..client_manager import get_database_mode, is_asyncpg_mode
 
 logger = get_logger(__name__)
 
 
 class BaseStorageService(ABC):
-    """Base class for all storage services with common functionality."""
+    """Base class for all storage services with common functionality.
+
+    Supports both asyncpg (K8s) and Supabase (legacy) database backends.
+    """
 
     def __init__(self, supabase_client=None):
         """Initialize with optional supabase client and threading service."""
-        # Lazy import to avoid circular dependency
-        if supabase_client is None:
-            from ...utils import get_supabase_client
-
-            supabase_client = get_supabase_client()
-        self.supabase_client = supabase_client
+        self._supabase_client = supabase_client
+        self._mode = get_database_mode()
 
         # Lazy import threading service
         from ...utils import get_utils_threading_service
-
         self.threading_service = get_utils_threading_service()
+
+    @property
+    def supabase_client(self):
+        """Lazy load Supabase client for legacy mode."""
+        if self._mode != "supabase":
+            raise ValueError("Supabase client not available in asyncpg mode")
+        if self._supabase_client is None:
+            from ...utils import get_supabase_client
+            self._supabase_client = get_supabase_client()
+        return self._supabase_client
 
     def smart_chunk_text(self, text: str, chunk_size: int = 5000) -> list[str]:
         """
