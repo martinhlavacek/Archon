@@ -19,13 +19,16 @@ def get_database_mode() -> str:
     Determine and cache which database mode to use.
 
     Returns:
-        'asyncpg' if DATABASE_URL is set, 'supabase' otherwise
+        'asyncpg' if DATABASE_URL or POSTGRES_HOST is set, 'supabase' otherwise
     """
     global _database_mode
     if _database_mode is None:
         if os.getenv("DATABASE_URL"):
             _database_mode = "asyncpg"
             search_logger.info("Database mode: asyncpg (DATABASE_URL)")
+        elif os.getenv("POSTGRES_HOST"):
+            _database_mode = "asyncpg"
+            search_logger.info(f"Database mode: asyncpg (POSTGRES_HOST={os.getenv('POSTGRES_HOST')})")
         elif os.getenv("SUPABASE_URL") and os.getenv("SUPABASE_SERVICE_KEY"):
             _database_mode = "supabase"
             search_logger.info("Database mode: supabase (SUPABASE_URL)")
@@ -33,6 +36,7 @@ def get_database_mode() -> str:
             raise ValueError(
                 "Database configuration required. Set one of:\n"
                 "  - DATABASE_URL: PostgreSQL connection string (preferred for K8s)\n"
+                "  - POSTGRES_HOST + POSTGRES_USER + POSTGRES_PASSWORD: Individual params (K8s)\n"
                 "  - SUPABASE_URL + SUPABASE_SERVICE_KEY: Supabase credentials (legacy)"
             )
     return _database_mode

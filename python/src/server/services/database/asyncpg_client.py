@@ -35,11 +35,16 @@ class AsyncPGClient(DatabaseClient):
         """
         Get or create the connection pool.
 
+        Supports two configuration methods:
+        1. DATABASE_URL environment variable (full connection string)
+        2. Individual POSTGRES_* environment variables:
+           - POSTGRES_HOST, POSTGRES_PORT, POSTGRES_USER, POSTGRES_PASSWORD, POSTGRES_DB
+
         Returns:
             asyncpg connection pool
 
         Raises:
-            ValueError: If DATABASE_URL is not set
+            ValueError: If no connection parameters are set
             ConnectionError: If unable to connect to database
         """
         if cls._pool is None:
@@ -47,21 +52,41 @@ class AsyncPGClient(DatabaseClient):
                 # Double-check pattern
                 if cls._pool is None:
                     database_url = os.getenv("DATABASE_URL")
-                    if not database_url:
+                    postgres_host = os.getenv("POSTGRES_HOST")
+
+                    if not database_url and not postgres_host:
                         raise ValueError(
-                            "DATABASE_URL environment variable is required. "
-                            "Set it to your PostgreSQL connection string."
+                            "Database connection not configured. "
+                            "Set DATABASE_URL or POSTGRES_* environment variables."
                         )
 
                     try:
-                        cls._pool = await asyncpg.create_pool(
-                            database_url,
-                            min_size=2,
-                            max_size=10,
-                            command_timeout=60,
-                            statement_cache_size=0,  # Disable statement cache for flexibility
-                        )
-                        logger.info("AsyncPG connection pool created successfully")
+                        if postgres_host:
+                            # Use individual connection parameters
+                            # This handles special characters in username/password better
+                            cls._pool = await asyncpg.create_pool(
+                                host=postgres_host,
+                                port=int(os.getenv("POSTGRES_PORT", "5432")),
+                                user=os.getenv("POSTGRES_USER", "postgres"),
+                                password=os.getenv("POSTGRES_PASSWORD", ""),
+                                database=os.getenv("POSTGRES_DB", "postgres"),
+                                ssl=os.getenv("POSTGRES_SSL", "require"),
+                                min_size=2,
+                                max_size=10,
+                                command_timeout=60,
+                                statement_cache_size=0,
+                            )
+                            logger.info(f"AsyncPG pool created (host: {postgres_host})")
+                        else:
+                            # Use DATABASE_URL
+                            cls._pool = await asyncpg.create_pool(
+                                database_url,
+                                min_size=2,
+                                max_size=10,
+                                command_timeout=60,
+                                statement_cache_size=0,
+                            )
+                            logger.info("AsyncPG pool created (DATABASE_URL)")
                     except Exception as e:
                         logger.error(f"Failed to create database pool: {e}")
                         raise ConnectionError(f"Unable to connect to database: {e}") from e

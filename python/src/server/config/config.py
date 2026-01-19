@@ -187,6 +187,9 @@ def load_environment_config() -> EnvironmentConfig:
     # Check for DATABASE_URL first (asyncpg mode - preferred for K8s)
     database_url = os.getenv("DATABASE_URL")
 
+    # Check for individual POSTGRES_* params (alternative asyncpg mode)
+    postgres_host = os.getenv("POSTGRES_HOST")
+
     # Fallback to Supabase if DATABASE_URL not set
     supabase_url = os.getenv("SUPABASE_URL")
     supabase_service_key = os.getenv("SUPABASE_SERVICE_KEY")
@@ -199,6 +202,9 @@ def load_environment_config() -> EnvironmentConfig:
                 "DATABASE_URL must be a valid PostgreSQL connection string, "
                 "e.g.: postgresql://user:password@host:5432/database"
             )
+    elif postgres_host:
+        # Using asyncpg mode with individual parameters - valid configuration
+        pass
     elif supabase_url and supabase_service_key:
         # Using Supabase mode - validate Supabase config
         if openai_api_key:
@@ -236,6 +242,7 @@ def load_environment_config() -> EnvironmentConfig:
         raise ConfigurationError(
             "Database configuration required. Set one of:\n"
             "  - DATABASE_URL: PostgreSQL connection string (preferred for K8s)\n"
+            "  - POSTGRES_HOST + POSTGRES_USER + POSTGRES_PASSWORD: Individual params (K8s)\n"
             "  - SUPABASE_URL + SUPABASE_SERVICE_KEY: Supabase credentials (legacy)"
         )
 
