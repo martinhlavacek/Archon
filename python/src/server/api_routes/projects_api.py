@@ -296,7 +296,7 @@ async def get_all_task_counts(
         # Get client explicitly to ensure mocking works in tests
         supabase_client = get_supabase_client()
         task_service = TaskService(supabase_client)
-        success, result = task_service.get_all_project_task_counts()
+        success, result = await task_service.get_all_project_task_counts()
 
         if not success:
             logfire.error(f"Failed to get task counts | error={result.get('error')}")
