@@ -390,50 +390,93 @@ async def get_knowledge_item_chunks(
             f"limit={limit} | offset={offset}"
         )
 
-        supabase = get_supabase_client()
+        from ..services.client_manager import is_asyncpg_mode
 
-        # First get total count
-        count_query = supabase.from_("archon_crawled_pages").select(
-            "id", count="exact", head=True
-        )
-        count_query = count_query.eq("source_id", source_id)
+        if is_asyncpg_mode():
+            from ..services.database import AsyncPGClient
 
-        if domain_filter:
-            count_query = count_query.ilike("url", f"%{domain_filter}%")
+            # Build count query
+            count_sql = "SELECT COUNT(*) FROM archon_crawled_pages WHERE source_id = $1"
+            count_params = [source_id]
 
-        count_result = count_query.execute()
-        total = count_result.count if hasattr(count_result, "count") else 0
+            if domain_filter:
+                count_sql += " AND url ILIKE $2"
+                count_params.append(f"%{domain_filter}%")
 
-        # Build the main query with pagination
-        query = supabase.from_("archon_crawled_pages").select(
-            "id, source_id, content, metadata, url"
-        )
-        query = query.eq("source_id", source_id)
+            count_result = await AsyncPGClient.fetchrow(count_sql, *count_params)
+            total = count_result["count"] if count_result else 0
 
-        # Apply domain filtering if provided
-        if domain_filter:
-            query = query.ilike("url", f"%{domain_filter}%")
+            # Build main query with pagination
+            main_sql = """
+                SELECT id, source_id, content, metadata, url
+                FROM archon_crawled_pages
+                WHERE source_id = $1
+            """
+            main_params = [source_id]
+            param_idx = 2
 
-        # Deterministic ordering (URL then id)
-        query = query.order("url", desc=False).order("id", desc=False)
+            if domain_filter:
+                main_sql += f" AND url ILIKE ${param_idx}"
+                main_params.append(f"%{domain_filter}%")
+                param_idx += 1
 
-        # Apply pagination
-        query = query.range(offset, offset + limit - 1)
+            main_sql += f" ORDER BY url ASC, id ASC LIMIT ${param_idx} OFFSET ${param_idx + 1}"
+            main_params.extend([limit, offset])
 
-        result = query.execute()
-        # Check for error more explicitly to work with mocks
-        if hasattr(result, "error") and result.error is not None:
-            safe_logfire_error(
-                f"Supabase query error | source_id={source_id} | error={result.error}"
+            rows = await AsyncPGClient.fetch(main_sql, *main_params)
+            chunks = [dict(row) for row in rows] if rows else []
+        else:
+            supabase = get_supabase_client()
+
+            # First get total count
+            count_query = supabase.from_("archon_crawled_pages").select(
+                "id", count="exact", head=True
             )
-            raise HTTPException(status_code=500, detail={"error": str(result.error)})
+            count_query = count_query.eq("source_id", source_id)
 
-        chunks = result.data if result.data else []
+            if domain_filter:
+                count_query = count_query.ilike("url", f"%{domain_filter}%")
+
+            count_result = count_query.execute()
+            total = count_result.count if hasattr(count_result, "count") else 0
+
+            # Build the main query with pagination
+            query = supabase.from_("archon_crawled_pages").select(
+                "id, source_id, content, metadata, url"
+            )
+            query = query.eq("source_id", source_id)
+
+            # Apply domain filtering if provided
+            if domain_filter:
+                query = query.ilike("url", f"%{domain_filter}%")
+
+            # Deterministic ordering (URL then id)
+            query = query.order("url", desc=False).order("id", desc=False)
+
+            # Apply pagination
+            query = query.range(offset, offset + limit - 1)
+
+            result = query.execute()
+            # Check for error more explicitly to work with mocks
+            if hasattr(result, "error") and result.error is not None:
+                safe_logfire_error(
+                    f"Supabase query error | source_id={source_id} | error={result.error}"
+                )
+                raise HTTPException(status_code=500, detail={"error": str(result.error)})
+
+            chunks = result.data if result.data else []
 
         # Extract useful fields from metadata to top level for frontend
         # This ensures the API response matches the TypeScript DocumentChunk interface
         for chunk in chunks:
             metadata = chunk.get("metadata", {}) or {}
+            # Handle case where metadata is a JSON string (asyncpg returns JSONB as dict, but just in case)
+            if isinstance(metadata, str):
+                import json
+                try:
+                    metadata = json.loads(metadata)
+                except (json.JSONDecodeError, TypeError):
+                    metadata = {}
 
             # Generate meaningful titles from available data
             title = None
