@@ -87,7 +87,7 @@ jobs:
           # Check MCP affected (python/src/mcp/)
           MCP_AFFECTED=false
           MCP_COMMITS=$(git log HEAD~1..HEAD --oneline -- \
-            'python/src/mcp/' \
+            'python/src/mcp_server/' \
             'python/src/config/' \
             'python/pyproject.toml' \
             'python/Dockerfile.mcp' \
