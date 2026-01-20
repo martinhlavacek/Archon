@@ -184,19 +184,23 @@ See implementation examples:
 
 ## Database Schema
 
-Key tables in Supabase:
+Key tables in PostgreSQL (using asyncpg):
 
-- `sources` - Crawled websites and uploaded documents
+- `archon_sources` - Crawled websites and uploaded documents
   - Stores metadata, crawl status, and configuration
-- `documents` - Processed document chunks with embeddings
+- `archon_crawled_pages` - Processed document chunks with embeddings
   - Text chunks with vector embeddings for semantic search
-- `projects` - Project management (optional feature)
+- `archon_page_metadata` - Full page content and metadata
+  - Linked to sources, contains section structure
+- `archon_projects` - Project management (optional feature)
   - Contains features array, documents, and metadata
-- `tasks` - Task tracking linked to projects
+- `archon_tasks` - Task tracking linked to projects
   - Status: todo, doing, review, done
   - Assignee: User, Archon, AI IDE Agent
-- `code_examples` - Extracted code snippets
+- `archon_code_examples` - Extracted code snippets
   - Language, summary, and relevance metadata
+- `archon_prompts` - Stored prompts for various operations
+- `archon_settings` - Application settings (encrypted values supported)
 
 ## API Naming Conventions
 
@@ -209,12 +213,27 @@ Use database values directly (no FE mapping; type‑safe end‑to‑end from BE 
 Required in `.env`:
 
 ```bash
-SUPABASE_URL=https://your-project.supabase.co  # Or http://host.docker.internal:8000 for local
-SUPABASE_SERVICE_KEY=your-service-key-here      # Use legacy key format for cloud Supabase
+# PostgreSQL connection (asyncpg)
+DATABASE_URL=postgresql://postgres:postgres@localhost:5432/archon
+
+# Service ports (required)
+ARCHON_SERVER_PORT=8181
+ARCHON_MCP_PORT=8051
+ARCHON_AGENTS_PORT=8052
+
+# OpenAI for embeddings
+OPENAI_API_KEY=sk-...
 ```
 
-Optional variables and full configuration:
-See `python/.env.example` for complete list
+Optional variables for remote connections (MCP connecting to external Archon):
+
+```bash
+# URL overrides - highest priority, bypasses service discovery
+ARCHON_API_URL=https://api.archon.example.com:9443
+ARCHON_MCP_URL=https://mcp.archon.example.com:8051
+```
+
+Full configuration: See `python/.env.example` for complete list
 
 ### Repository Configuration
 
@@ -260,7 +279,8 @@ Environment variable override: `GITHUB_REPO="owner/repo"` can be set to override
 1. Check MCP health: `curl http://localhost:8051/health`
 2. View MCP logs: `docker compose logs archon-mcp`
 3. Test tool execution via UI MCP page
-4. Verify Supabase connection and credentials
+4. Verify PostgreSQL connection and credentials
+5. Check service discovery: MCP auto-detects Docker vs local environment
 
 ### Fix TypeScript/Linting Issues
 
@@ -323,6 +343,59 @@ When connected to Claude/Cursor/Windsurf, the following tools are available:
 - `archon:find_versions` - Find version history or get specific version
 - `archon:manage_version` - Manage versions with actions: "create", "restore"
 
+## Deployment
+
+### Local Development (Docker Compose)
+
+```bash
+docker compose up --build -d           # Start all services
+docker compose --profile backend up -d  # Backend only (hybrid dev)
+```
+
+### Kubernetes (k3d / k3s)
+
+Archon can be deployed to Kubernetes clusters using ArgoCD GitOps:
+
+- **GitOps repo**: `martinhlavacek/tailadmin-gitops`
+- **Path**: `environments/{env}/archon/`
+- **Images**: Published to GHCR (`ghcr.io/martinhlavacek/archon-*`)
+
+```bash
+# Check deployment status
+kubectl -n archon get pods
+kubectl -n archon logs deployment/archon-server
+```
+
+### CI/CD Workflows
+
+| Workflow | Trigger | Description |
+|----------|---------|-------------|
+| `deploy-dev.yml` | Push to main | Auto-builds and deploys to dev k3d cluster |
+| `release.yml` | Manual dispatch | Creates versioned releases with :latest tags |
+
+**Release workflow:**
+1. Detects changed components (API, UI, MCP)
+2. Builds and pushes Docker images to GHCR
+3. Updates GitOps manifests with new image tags
+4. Merges release branch back to main
+
+### Service Discovery
+
+The `ServiceDiscovery` class (`python/src/server/config/service_discovery.py`) auto-detects environment:
+
+- **Docker Compose**: Uses container names (archon-server, archon-mcp)
+- **Local**: Uses localhost with configured ports
+- **URL Overrides**: Environment variables take highest priority
+
+```python
+# Priority order:
+# 1. ARCHON_API_URL environment variable (if set)
+# 2. Docker service discovery (if in container)
+# 3. Localhost with ARCHON_SERVER_PORT
+```
+
+This enables MCP to connect to remote Archon instances (e.g., MCP on laptop → API in k3d cluster).
+
 ## Important Notes
 
 - Projects feature is optional - toggle in Settings UI
@@ -332,3 +405,4 @@ When connected to Claude/Cursor/Windsurf, the following tools are available:
 - Docker Compose handles service orchestration
 - TanStack Query for all data fetching - NO PROP DRILLING
 - Vertical slice architecture in `/features` - features own their sub-features
+- Database uses asyncpg for direct PostgreSQL connections (no ORM)
