@@ -446,9 +446,38 @@ jobs:
           echo ""
           echo "GitOps dispatch sent successfully"
 
+  # Auto-merge release back to main
+  merge-to-main:
+    needs: [detect-and-version, trigger-gitops-deploy]
+    runs-on: ubuntu-latest
+    if: |
+      always() && !inputs.dry_run &&
+      needs.trigger-gitops-deploy.result == 'success'
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Configure Git
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+      - name: Merge release to main
+        run: |
+          git fetch origin main release
+          git checkout main
+          git merge origin/release --no-edit -m "chore: merge release to main [skip ci]"
+          git push origin main
+          echo "✅ Merged release branch back to main"
+
   # Summary
   summary:
-    needs: [detect-and-version, release-api, release-ui, release-mcp, trigger-gitops-deploy]
+    needs: [detect-and-version, release-api, release-ui, release-mcp, trigger-gitops-deploy, merge-to-main]
     runs-on: ubuntu-latest
     if: always()
     steps:

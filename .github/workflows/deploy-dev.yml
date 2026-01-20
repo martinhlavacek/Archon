@@ -135,13 +135,45 @@ jobs:
         run: uv python install ${{ env.PYTHON_VERSION }}
 
       - name: Install dependencies
-        run: uv sync --group all --group dev
+        run: |
+          uv sync --group all --group dev
+          uv add pytest-cov
 
-      - name: Run tests
+      - name: Run linting with ruff
+        continue-on-error: true
+        run: |
+          if uv run which ruff > /dev/null 2>&1; then
+            echo "Running ruff linting..."
+            uv run ruff check src/ tests/ || true
+          else
+            echo "Ruff not found, skipping linting"
+          fi
+
+      - name: Run type checking with mypy
+        continue-on-error: true
+        run: |
+          if uv run which mypy > /dev/null 2>&1; then
+            echo "Running mypy type checking..."
+            uv run mypy src/ || true
+          else
+            echo "MyPy not found, skipping type checking"
+          fi
+
+      - name: Run tests with coverage
         run: |
           uv run pytest tests/ --verbose --tb=short \
             --ignore=tests/agent_work_orders \
+            --cov=src --cov-report=xml --cov-report=term-missing \
             -x
+
+      - name: Upload coverage to Codecov
+        if: always() && github.event_name == 'push'
+        uses: codecov/codecov-action@v4
+        with:
+          files: ./python/coverage.xml
+          flags: backend
+          name: backend-coverage
+          token: ${{ secrets.CODECOV_TOKEN }}
 
   # Run frontend tests if UI affected
   test-frontend:
@@ -165,9 +197,8 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
-      # Frontend tests are currently disabled in Archon
-      # - name: Run tests
-      #   run: npm run test
+      - name: Run ESLint
+        run: npm run lint
 
   # Build and push Archon API
   build-api:
