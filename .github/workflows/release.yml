@@ -149,6 +149,11 @@ jobs:
           echo "archon-ui: $UI_AFFECTED"
           echo "archon-mcp: $MCP_AFFECTED"
 
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 18
+
       - name: Calculate versions
         id: versions
         run: |
@@ -226,6 +231,34 @@ jobs:
           echo "ui_version=$UI_VERSION" >> $GITHUB_OUTPUT
           echo "mcp_version=$MCP_VERSION" >> $GITHUB_OUTPUT
 
+      - name: Update source file versions
+        if: "!inputs.dry_run"
+        run: |
+          API_VERSION="${{ steps.versions.outputs.api_version }}"
+          UI_VERSION="${{ steps.versions.outputs.ui_version }}"
+          API_AFFECTED="${{ steps.affected.outputs.api_affected }}"
+          UI_AFFECTED="${{ steps.affected.outputs.ui_affected }}"
+
+          # Update pyproject.toml if API or MCP affected
+          if [ "$API_AFFECTED" = "true" ] || [ "${{ steps.affected.outputs.mcp_affected }}" = "true" ]; then
+            CURRENT_API=$(grep -oP 'version = "\K[^"]+' python/pyproject.toml | head -1)
+            if [ "$CURRENT_API" != "$API_VERSION" ]; then
+              sed -i "s/version = \"$CURRENT_API\"/version = \"$API_VERSION\"/" python/pyproject.toml
+              git add python/pyproject.toml
+              echo "Updated pyproject.toml: $CURRENT_API -> $API_VERSION"
+            fi
+          fi
+
+          # Update archon-ui-main/package.json if UI affected
+          if [ "$UI_AFFECTED" = "true" ]; then
+            CURRENT_UI=$(node -p "require('./archon-ui-main/package.json').version")
+            if [ "$CURRENT_UI" != "$UI_VERSION" ]; then
+              cd archon-ui-main && npm version $UI_VERSION --no-git-tag-version && cd ..
+              git add archon-ui-main/package.json
+              echo "Updated archon-ui-main/package.json: $CURRENT_UI -> $UI_VERSION"
+            fi
+          fi
+
       - name: Create release tags
         if: "!inputs.dry_run"
         run: |
@@ -254,8 +287,9 @@ jobs:
             fi
           fi
 
-          # Push tags
-          git push origin --tags
+          # Commit version changes and push with tags
+          git diff --staged --quiet || git commit -m "chore(release): sync versions [skip ci]"
+          git push --follow-tags
 
   # Re-tag API image
   release-api:
