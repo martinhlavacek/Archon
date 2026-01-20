@@ -1,5 +1,5 @@
 """
-FastAPI Backend for Archon Knowledge Engine
+FastAPI Backend for Archon Knowledge Engine v0.1.1
 
 This is the main entry point for the Archon backend API.
 It uses a modular approach with separate API modules for different functionality.
