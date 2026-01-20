@@ -1,8 +1,9 @@
 """
-FastAPI Backend for Archon Knowledge Engine v0.1.1
+FastAPI Backend for Archon Knowledge Engine
 
 This is the main entry point for the Archon backend API.
 It uses a modular approach with separate API modules for different functionality.
+Version is read dynamically from package metadata.
 
 Modules:
 - settings_api: Settings and credentials management
