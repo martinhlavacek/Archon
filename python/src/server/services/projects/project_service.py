@@ -266,6 +266,17 @@ class ProjectService:
         if hasattr(project_dict.get("updated_at"), 'isoformat'):
             project_dict["updated_at"] = project_dict["updated_at"].isoformat()
 
+        # Parse JSONB fields (asyncpg may return them as strings)
+        for field in ["docs", "features", "data"]:
+            value = project_dict.get(field)
+            if isinstance(value, str):
+                try:
+                    project_dict[field] = json.loads(value)
+                except json.JSONDecodeError:
+                    project_dict[field] = []
+            elif value is None:
+                project_dict[field] = []
+
         # Get linked sources
         technical_sources = []
         business_sources = []
@@ -587,6 +598,16 @@ class ProjectService:
                 project_dict["created_at"] = project_dict["created_at"].isoformat()
             if hasattr(project_dict.get("updated_at"), 'isoformat'):
                 project_dict["updated_at"] = project_dict["updated_at"].isoformat()
+            # Parse JSONB fields (asyncpg may return them as strings)
+            for field in ["docs", "features", "data"]:
+                value = project_dict.get(field)
+                if isinstance(value, str):
+                    try:
+                        project_dict[field] = json.loads(value)
+                    except json.JSONDecodeError:
+                        project_dict[field] = []
+                elif value is None:
+                    project_dict[field] = []
             return True, {"project": project_dict, "message": "Project updated successfully"}
         else:
             return False, {"error": f"Project with ID {project_id} not found"}
