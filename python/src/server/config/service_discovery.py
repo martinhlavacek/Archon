@@ -25,7 +25,20 @@ class ServiceDiscovery:
 
     In Docker Compose: Uses container names
     In Local: Uses localhost with different ports
+
+    URL Override (highest priority):
+        Set ARCHON_API_URL, ARCHON_MCP_URL, or ARCHON_AGENTS_URL to override
+        auto-discovered URLs. Useful for pointing MCP to remote Archon instances.
+        Example: ARCHON_API_URL=https://api.archon.dev.toxify.ai:9443
     """
+
+    # URL override environment variable names
+    URL_OVERRIDES = {
+        "api": "ARCHON_API_URL",
+        "mcp": "ARCHON_MCP_URL",
+        "agents": "ARCHON_AGENTS_URL",
+        "agent_work_orders": "ARCHON_AGENT_WORK_ORDERS_URL",
+    }
 
     def __init__(self):
         # Get ports during initialization
@@ -105,6 +118,11 @@ class ServiceDiscovery:
         """
         Get the URL for a service based on the current environment.
 
+        Priority:
+        1. Explicit URL override (ARCHON_API_URL, ARCHON_MCP_URL, etc.)
+        2. Docker Compose service discovery
+        3. Local development (localhost)
+
         Args:
             service: Service name (e.g., "api", "mcp", "agents")
             protocol: Protocol to use (default: "http")
@@ -115,6 +133,16 @@ class ServiceDiscovery:
         cache_key = f"{protocol}://{service}"
         if cache_key in self._cache:
             return self._cache[cache_key]
+
+        # Check for explicit URL override first (highest priority)
+        override_env = self.URL_OVERRIDES.get(service)
+        if override_env:
+            override_url = os.getenv(override_env)
+            if override_url:
+                # Remove trailing slash if present
+                url = override_url.rstrip("/")
+                self._cache[cache_key] = url
+                return url
 
         # Normalize service name
         service_name = self.SERVICE_NAMES.get(service, service)
