@@ -83,10 +83,10 @@ jobs:
           fi
           echo "API base ref: $API_BASE"
 
+          # Note: pyproject.toml excluded - version changes shouldn't trigger releases
           API_COMMITS=$(git log $API_BASE..HEAD --oneline -- \
             'python/src/server/' \
             'python/src/config/' \
-            'python/pyproject.toml' \
             'python/Dockerfile.server' \
             2>/dev/null | grep -v "chore(release): sync" || echo "")
 
@@ -106,8 +106,14 @@ jobs:
           fi
           echo "UI base ref: $UI_BASE"
 
+          # Note: package.json excluded via src/ path - version changes shouldn't trigger releases
           UI_COMMITS=$(git log $UI_BASE..HEAD --oneline -- \
-            'archon-ui-main/' \
+            'archon-ui-main/src/' \
+            'archon-ui-main/public/' \
+            'archon-ui-main/index.html' \
+            'archon-ui-main/vite.config.ts' \
+            'archon-ui-main/tailwind.config.js' \
+            'archon-ui-main/Dockerfile.prod' \
             2>/dev/null | grep -v "chore(release): sync" || echo "")
 
           if [ -n "$UI_COMMITS" ]; then
@@ -126,10 +132,10 @@ jobs:
           fi
           echo "MCP base ref: $MCP_BASE"
 
+          # Note: pyproject.toml excluded - version changes shouldn't trigger releases
           MCP_COMMITS=$(git log $MCP_BASE..HEAD --oneline -- \
             'python/src/mcp_server/' \
             'python/src/config/' \
-            'python/pyproject.toml' \
             'python/Dockerfile.mcp' \
             2>/dev/null | grep -v "chore(release): sync" || echo "")
 
@@ -216,10 +222,10 @@ jobs:
           echo "  UI: $UI_CURRENT"
           echo "  MCP: $MCP_CURRENT"
 
-          # Calculate new versions
-          API_VERSION=$(calculate_version "archon-api" "python/src/server/ python/src/config/ python/pyproject.toml python/Dockerfile.server" "$API_CURRENT")
-          UI_VERSION=$(calculate_version "archon-ui" "archon-ui-main/" "$UI_CURRENT")
-          MCP_VERSION=$(calculate_version "archon-mcp" "python/src/mcp/ python/src/config/ python/pyproject.toml python/Dockerfile.mcp" "$MCP_CURRENT")
+          # Calculate new versions (paths must match affected detection - exclude version files)
+          API_VERSION=$(calculate_version "archon-api" "python/src/server/ python/src/config/ python/Dockerfile.server" "$API_CURRENT")
+          UI_VERSION=$(calculate_version "archon-ui" "archon-ui-main/src/ archon-ui-main/public/ archon-ui-main/index.html archon-ui-main/vite.config.ts archon-ui-main/tailwind.config.js archon-ui-main/Dockerfile.prod" "$UI_CURRENT")
+          MCP_VERSION=$(calculate_version "archon-mcp" "python/src/mcp_server/ python/src/config/ python/Dockerfile.mcp" "$MCP_CURRENT")
 
           echo ""
           echo "New versions:"
