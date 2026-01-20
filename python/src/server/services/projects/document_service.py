@@ -110,7 +110,7 @@ class DocumentService:
             RETURNING id
             """,
             json.dumps(updated_docs),
-            datetime.now().isoformat(),
+            datetime.now(),  # asyncpg needs datetime object
             project_id
         )
 
@@ -392,7 +392,7 @@ class DocumentService:
                 if "version" in update_fields:
                     docs[i]["version"] = update_fields["version"]
 
-                docs[i]["updated_at"] = datetime.now().isoformat()
+                docs[i]["updated_at"] = datetime.now().isoformat()  # doc timestamp stays ISO string in JSONB
                 updated = True
                 break
 
@@ -410,7 +410,7 @@ class DocumentService:
             RETURNING id
             """,
             json.dumps(docs),
-            datetime.now().isoformat(),
+            datetime.now(),  # asyncpg needs datetime object for project.updated_at
             project_id
         )
 
@@ -548,7 +548,7 @@ class DocumentService:
                     RETURNING id
                     """,
                     json.dumps(docs),
-                    datetime.now().isoformat(),
+                    datetime.now(),  # asyncpg needs datetime object
                     project_id
                 )
 
@@ -556,7 +556,7 @@ class DocumentService:
                     return True, {"project_id": project_id, "doc_id": doc_id}
                 else:
                     return False, {"error": "Failed to delete document"}
-            else:
+            else:  # Supabase branch
                 # Get current project docs
                 project_response = (
                     self.supabase_client.table("archon_projects")

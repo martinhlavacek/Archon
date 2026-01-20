@@ -123,7 +123,7 @@ class TaskService:
         """Create task using asyncpg."""
         from ..database import AsyncPGClient
 
-        now = datetime.now().isoformat()
+        now = datetime.now()  # asyncpg needs datetime object
 
         # REORDERING LOGIC: If inserting at a specific position, increment existing tasks
         if task_order > 0:
@@ -540,8 +540,8 @@ class TaskService:
             Tuple of (success, result_dict)
         """
         try:
-            # Build update data
-            update_data = {"updated_at": datetime.now().isoformat()}
+            # Build update data (without timestamp - added per backend)
+            update_data: dict[str, Any] = {}
 
             # Validate and add fields
             if "title" in update_fields:
@@ -575,8 +575,10 @@ class TaskService:
                 update_data["feature"] = update_fields["feature"]
 
             if is_asyncpg_mode():
+                update_data["updated_at"] = datetime.now()  # asyncpg needs datetime object
                 return await self._update_task_asyncpg(task_id, update_data)
             else:
+                update_data["updated_at"] = datetime.now().isoformat()  # Supabase needs ISO string
                 return await self._update_task_supabase(task_id, update_data)
 
         except Exception as e:
@@ -649,10 +651,10 @@ class TaskService:
             Tuple of (success, result_dict)
         """
         try:
-            now = datetime.now().isoformat()
-
             if is_asyncpg_mode():
                 from ..database import AsyncPGClient
+
+                now = datetime.now()  # asyncpg needs datetime object
 
                 # Check if task exists and is not already archived
                 task = await AsyncPGClient.fetchrow(
@@ -676,6 +678,8 @@ class TaskService:
                 )
                 return True, {"task_id": task_id, "message": "Task archived successfully"}
             else:
+                now = datetime.now().isoformat()  # Supabase needs ISO string
+
                 # Check if task exists and is not already archived
                 task_response = (
                     self.supabase_client.table("archon_tasks").select("*").eq("id", task_id).execute()

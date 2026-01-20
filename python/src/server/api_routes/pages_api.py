@@ -13,6 +13,7 @@ from pydantic import BaseModel
 from ..config.logfire_config import get_logger, safe_logfire_error
 from ..services.client_manager import is_asyncpg_mode
 from ..utils import get_supabase_client
+from ..utils.type_converters import row_to_dict
 
 # Get logger for this module
 logger = get_logger(__name__)
@@ -124,7 +125,7 @@ async def list_pages(
             sql += " ORDER BY section_order, created_at"
 
             rows = await AsyncPGClient.fetch(sql, *params)
-            pages = [PageSummary(**dict(row)) for row in rows] if rows else []
+            pages = [PageSummary(**row_to_dict(row)) for row in rows] if rows else []
         else:
             client = get_supabase_client()
 
@@ -178,7 +179,7 @@ async def get_page_by_url(url: str = Query(..., description="The URL of the page
             if not row:
                 raise HTTPException(status_code=404, detail=f"Page not found for URL: {url}")
 
-            page_data = _handle_large_page_content(dict(row))
+            page_data = _handle_large_page_content(row_to_dict(row))
             return PageResponse(**page_data)
         else:
             client = get_supabase_client()
@@ -223,7 +224,7 @@ async def get_page_by_id(page_id: str):
             if not row:
                 raise HTTPException(status_code=404, detail=f"Page not found: {page_id}")
 
-            page_data = _handle_large_page_content(dict(row))
+            page_data = _handle_large_page_content(row_to_dict(row))
             return PageResponse(**page_data)
         else:
             client = get_supabase_client()

@@ -48,9 +48,8 @@ class ProjectService:
             if not title or not isinstance(title, str) or len(title.strip()) == 0:
                 return False, {"error": "Project title is required and must be a non-empty string"}
 
-            now = datetime.now().isoformat()
-
             if is_asyncpg_mode():
+                now = datetime.now()  # asyncpg needs datetime object
                 from ..database import AsyncPGClient
 
                 # Insert project
@@ -86,6 +85,7 @@ class ProjectService:
                 }
             else:
                 # Supabase mode
+                now = datetime.now().isoformat()  # Supabase needs ISO string
                 project_data = {
                     "title": title.strip(),
                     "docs": [],
@@ -518,12 +518,7 @@ class ProjectService:
             Tuple of (success, result_dict)
         """
         try:
-            now = datetime.now().isoformat()
-
             # Build update data
-            update_data = {"updated_at": now}
-
-            # Add allowed fields
             allowed_fields = [
                 "title",
                 "description",
@@ -536,13 +531,19 @@ class ProjectService:
                 "pinned",
             ]
 
-            for field in allowed_fields:
-                if field in update_fields:
-                    update_data[field] = update_fields[field]
-
             if is_asyncpg_mode():
+                now = datetime.now()  # asyncpg needs datetime object
+                update_data = {"updated_at": now}
+                for field in allowed_fields:
+                    if field in update_fields:
+                        update_data[field] = update_fields[field]
                 return await self._update_project_asyncpg(project_id, update_data, update_fields)
             else:
+                now = datetime.now().isoformat()  # Supabase needs ISO string
+                update_data = {"updated_at": now}
+                for field in allowed_fields:
+                    if field in update_fields:
+                        update_data[field] = update_fields[field]
                 return self._update_project_supabase(project_id, update_data, update_fields)
 
         except Exception as e:
