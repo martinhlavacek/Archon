@@ -209,9 +209,14 @@ app.include_router(migration_router)
 @app.get("/")
 async def root():
     """Root endpoint returning API information."""
+    import importlib.metadata
+    try:
+        version = importlib.metadata.version("archon")
+    except importlib.metadata.PackageNotFoundError:
+        version = "dev"
     return {
         "name": "Archon Knowledge Engine API",
-        "version": "1.0.0",
+        "version": version,
         "description": "Backend API for knowledge management and project automation",
         "status": "healthy",
         "modules": ["settings", "mcp", "mcp-clients", "knowledge", "projects"],
