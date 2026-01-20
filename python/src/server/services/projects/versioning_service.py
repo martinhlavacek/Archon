@@ -90,7 +90,7 @@ class VersioningService:
         if result:
             next_version = result["version_number"] + 1
 
-        now = datetime.now().isoformat()
+        now = datetime.now()  # asyncpg needs datetime object
 
         # Create new version record
         version = await AsyncPGClient.fetchrow(
@@ -372,7 +372,7 @@ class VersioningService:
             if not backup_result[0]:
                 logger.warning(f"Failed to create backup version: {backup_result[1]}")
 
-        now = datetime.now().isoformat()
+        now = datetime.now()  # asyncpg needs datetime object
 
         # Restore the content to project
         await AsyncPGClient.execute(
