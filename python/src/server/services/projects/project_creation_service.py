@@ -86,7 +86,7 @@ class ProjectCreationService:
         """Create project with AI using asyncpg."""
         from ..database import AsyncPGClient
 
-        now = datetime.now(UTC).isoformat()
+        now = datetime.now(UTC)  # asyncpg needs datetime object, not ISO string
 
         # Create basic project structure
         features = kwargs.get("features", {})
