@@ -1,5 +1,6 @@
 """
 Pydantic Models for Archon Project Management
+Version: 0.2.1 (service discovery URL override support)
 
 This module defines Pydantic models for:
 - Project Requirements Document (PRD) structure
