@@ -448,11 +448,11 @@ jobs:
 
   # Auto-merge release back to main
   merge-to-main:
-    needs: [detect-and-version, trigger-gitops-deploy]
+    needs: [detect-and-version, release-api, release-ui, release-mcp, trigger-gitops-deploy]
     runs-on: ubuntu-latest
     if: |
       always() && !inputs.dry_run &&
-      needs.trigger-gitops-deploy.result == 'success'
+      (needs.release-api.result == 'success' || needs.release-ui.result == 'success' || needs.release-mcp.result == 'success')
     permissions:
       contents: write
     steps:
