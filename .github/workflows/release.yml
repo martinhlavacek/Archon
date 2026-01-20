@@ -359,9 +359,56 @@ jobs:
 
           echo "Published: ${{ env.ARCHON_MCP_IMAGE }}:$VERSION"
 
+  # Trigger GitOps deployment (external repo)
+  trigger-gitops-deploy:
+    needs: [detect-and-version, release-api, release-ui, release-mcp]
+    runs-on: ubuntu-latest
+    if: |
+      always() && !inputs.dry_run &&
+      (needs.release-api.result == 'success' || needs.release-ui.result == 'success')
+    steps:
+      - name: Trigger GitOps production deployment
+        env:
+          GITOPS_PAT: ${{ secrets.GITOPS_PAT }}
+        run: |
+          # Only send versions for components that were actually released
+          ARCHON_API_VERSION=""
+          ARCHON_UI_VERSION=""
+
+          if [ "${{ needs.release-api.result }}" = "success" ]; then
+            ARCHON_API_VERSION="${{ needs.detect-and-version.outputs.api_version }}"
+            echo "archon-api released: $ARCHON_API_VERSION"
+          else
+            echo "archon-api: skipped (no new release)"
+          fi
+
+          if [ "${{ needs.release-ui.result }}" = "success" ]; then
+            ARCHON_UI_VERSION="${{ needs.detect-and-version.outputs.ui_version }}"
+            echo "archon-ui released: $ARCHON_UI_VERSION"
+          else
+            echo "archon-ui: skipped (no new release)"
+          fi
+
+          echo ""
+          echo "Triggering GitOps deployment..."
+          curl -X POST \
+            -H "Accept: application/vnd.github.v3+json" \
+            -H "Authorization: token $GITOPS_PAT" \
+            https://api.github.com/repos/${{ github.repository_owner }}/tailadmin-gitops/dispatches \
+            -d "{
+              \"event_type\": \"archon-deploy\",
+              \"client_payload\": {
+                \"archon_api_version\": \"$ARCHON_API_VERSION\",
+                \"archon_ui_version\": \"$ARCHON_UI_VERSION\",
+                \"source_repo\": \"${{ github.repository }}\"
+              }
+            }"
+          echo ""
+          echo "GitOps dispatch sent successfully"
+
   # Summary
   summary:
-    needs: [detect-and-version, release-api, release-ui, release-mcp]
+    needs: [detect-and-version, release-api, release-ui, release-mcp, trigger-gitops-deploy]
     runs-on: ubuntu-latest
     if: always()
     steps:
@@ -388,3 +435,7 @@ jobs:
           fi
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "**Commit:** ${{ github.sha }}" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          if [ "${{ needs.trigger-gitops-deploy.result }}" = "success" ]; then
+            echo "_GitOps deployment triggered via external tailadmin-gitops repo._" >> $GITHUB_STEP_SUMMARY
+          fi
