@@ -1,5 +1,5 @@
 // Archon UI - Main Application Entry Point
-// Version: 0.1.4 (release test)
+// Version: 0.1.5 (labels test)
 import { useState, useEffect } from 'react';
 import { BrowserRouter as Router, Routes, Route, Navigate } from 'react-router-dom';
 import { QueryClientProvider } from '@tanstack/react-query';
