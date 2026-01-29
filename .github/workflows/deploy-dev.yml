@@ -307,9 +307,40 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
+  # Trigger GitOps update
+  trigger-gitops:
+    needs: [detect-changes, build-api, build-ui, build-mcp]
+    runs-on: ubuntu-latest
+    if: |
+      always() && github.event_name == 'push' &&
+      (needs.build-api.result == 'success' || needs.build-ui.result == 'success' || needs.build-mcp.result == 'success')
+    steps:
+      - name: Trigger GitOps dev-deploy
+        env:
+          GITOPS_PAT: ${{ secrets.GITOPS_PAT }}
+        run: |
+          VERSION="dev-${{ needs.detect-changes.outputs.short_sha }}"
+          echo "Triggering GitOps dev-deploy with version: $VERSION"
+
+          curl -X POST \
+            -H "Accept: application/vnd.github.v3+json" \
+            -H "Authorization: token $GITOPS_PAT" \
+            https://api.github.com/repos/${{ github.repository_owner }}/tailadmin-gitops/dispatches \
+            -d "{
+              \"event_type\": \"dev-deploy\",
+              \"client_payload\": {
+                \"version\": \"$VERSION\",
+                \"commit_sha\": \"${{ github.sha }}\",
+                \"archon_api_affected\": \"${{ needs.detect-changes.outputs.api_affected }}\",
+                \"archon_ui_affected\": \"${{ needs.detect-changes.outputs.ui_affected }}\",
+                \"source_repo\": \"${{ github.repository }}\"
+              }
+            }"
+          echo "GitOps dev-deploy dispatch sent"
+
   # Summary
   summary:
-    needs: [detect-changes, test-backend, test-frontend, build-api, build-ui, build-mcp]
+    needs: [detect-changes, test-backend, test-frontend, build-api, build-ui, build-mcp, trigger-gitops]
     runs-on: ubuntu-latest
     if: always() && github.event_name == 'push'
     steps:
@@ -326,6 +357,11 @@ jobs:
           echo "| archon-api | ${{ needs.detect-changes.outputs.api_affected }} | ${{ needs.build-api.result || 'skipped' }} |" >> $GITHUB_STEP_SUMMARY
           echo "| archon-ui | ${{ needs.detect-changes.outputs.ui_affected }} | ${{ needs.build-ui.result || 'skipped' }} |" >> $GITHUB_STEP_SUMMARY
           echo "| archon-mcp | ${{ needs.detect-changes.outputs.mcp_affected }} | ${{ needs.build-mcp.result || 'skipped' }} |" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### GitOps" >> $GITHUB_STEP_SUMMARY
+          echo "| Step | Status |" >> $GITHUB_STEP_SUMMARY
+          echo "|------|--------|" >> $GITHUB_STEP_SUMMARY
+          echo "| trigger-gitops | ${{ needs.trigger-gitops.result || 'skipped' }} |" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "Images pushed with \`:dev\` and \`:dev-$SHORT_SHA\` tags." >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
