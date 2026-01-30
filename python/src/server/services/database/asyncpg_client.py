@@ -6,6 +6,7 @@ Provides async connection pooling and query execution.
 """
 
 import asyncio
+import json
 import os
 from contextlib import asynccontextmanager
 from typing import Any
@@ -17,6 +18,22 @@ from ...config.logfire_config import get_logger
 from .client import DatabaseClient
 
 logger = get_logger(__name__)
+
+
+async def _init_connection(conn: asyncpg.Connection) -> None:
+    """Initialize connection with JSON codec for JSONB type handling."""
+    await conn.set_type_codec(
+        'jsonb',
+        encoder=json.dumps,
+        decoder=json.loads,
+        schema='pg_catalog'
+    )
+    await conn.set_type_codec(
+        'json',
+        encoder=json.dumps,
+        decoder=json.loads,
+        schema='pg_catalog'
+    )
 
 
 class AsyncPGClient(DatabaseClient):
@@ -75,6 +92,7 @@ class AsyncPGClient(DatabaseClient):
                                 max_size=10,
                                 command_timeout=60,
                                 statement_cache_size=0,
+                                init=_init_connection,
                             )
                             logger.info(f"AsyncPG pool created (host: {postgres_host})")
                         else:
@@ -85,6 +103,7 @@ class AsyncPGClient(DatabaseClient):
                                 max_size=10,
                                 command_timeout=60,
                                 statement_cache_size=0,
+                                init=_init_connection,
                             )
                             logger.info("AsyncPG pool created (DATABASE_URL)")
                     except Exception as e:
