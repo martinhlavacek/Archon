@@ -120,7 +120,7 @@ class HybridSearchStrategy:
                 source_filter := $5
             )
             """,
-            embedding_str, query, match_count, json.dumps(filter_json), source_filter
+            embedding_str, query, match_count, filter_json, source_filter
         )
 
         results = []
@@ -272,7 +272,7 @@ class HybridSearchStrategy:
                 source_filter := $5
             )
             """,
-            embedding_str, query, match_count, json.dumps(filter_json), final_source_filter
+            embedding_str, query, match_count, filter_json, final_source_filter
         )
 
         results = []
