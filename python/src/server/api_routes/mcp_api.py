@@ -201,10 +201,12 @@ async def get_mcp_config():
             mcp_port = int(os.getenv("ARCHON_MCP_PORT", "8051"))
 
             # Configuration for streamable-http mode with actual port
+            mcp_url = get_mcp_url()
             config = {
                 "host": os.getenv("ARCHON_HOST", "localhost"),
                 "port": mcp_port,
                 "transport": "streamable-http",
+                "mcp_url": f"{mcp_url}/mcp",
             }
 
             # Get only model choice from database (simplified)
