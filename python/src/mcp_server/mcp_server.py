@@ -554,6 +554,35 @@ except Exception as e:
 _server_start_time = time.time()
 
 
+class McpSessionTrackingMiddleware:
+    """ASGI middleware that tracks MCP client sessions from mcp-session-id headers."""
+
+    def __init__(self, app):
+        self.app = app
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] == "http":
+            path = scope.get("path", "")
+            if path.startswith("/mcp"):
+                # Extract headers from ASGI scope
+                headers = dict(scope.get("headers", []))
+                session_id = headers.get(b"mcp-session-id", b"").decode("utf-8", errors="ignore")
+                user_agent = headers.get(b"user-agent", b"").decode("utf-8", errors="ignore") or None
+
+                session_manager = get_session_manager()
+
+                if session_id:
+                    # Existing client - validate/update
+                    if not session_manager.validate_session(session_id):
+                        # Session expired, create new one
+                        session_manager.create_session(user_agent)
+                else:
+                    # New client - create session
+                    session_manager.create_session(user_agent)
+
+        return await self.app(scope, receive, send)
+
+
 # Define health endpoint function at module level
 async def http_health_endpoint(request: Request):
     """HTTP health check endpoint for monitoring systems."""
@@ -591,7 +620,36 @@ async def http_health_endpoint(request: Request):
         }, status_code=500)
 
 
-# Register health endpoint using FastMCP's custom_route decorator
+# Define sessions endpoint function at module level
+async def http_sessions_endpoint(request: Request):
+    """HTTP /sessions endpoint - returns session data from session manager."""
+    logger.info("Sessions endpoint called via HTTP")
+    try:
+        session_manager = get_session_manager()
+        uptime = time.time() - _server_start_time
+        if _shared_context and hasattr(_shared_context, "startup_time"):
+            uptime = time.time() - _shared_context.startup_time
+
+        return JSONResponse({
+            "success": True,
+            "active_sessions": session_manager.get_active_session_count(),
+            "session_timeout": session_manager.timeout,
+            "clients": session_manager.get_clients(),
+            "uptime_seconds": uptime,
+            "timestamp": datetime.now().isoformat(),
+        })
+    except Exception as e:
+        logger.error(f"Sessions endpoint failed: {e}", exc_info=True)
+        return JSONResponse({
+            "success": False,
+            "active_sessions": 0,
+            "session_timeout": 3600,
+            "clients": [],
+            "error": str(e),
+        }, status_code=500)
+
+
+# Register health and sessions endpoints using FastMCP's custom_route decorator
 try:
     mcp.custom_route("/health", methods=["GET"])(http_health_endpoint)
     logger.info("✓ HTTP /health endpoint registered successfully")
@@ -599,21 +657,47 @@ except Exception as e:
     logger.error(f"✗ Failed to register /health endpoint: {e}")
     logger.error(traceback.format_exc())
 
+try:
+    mcp.custom_route("/sessions", methods=["GET"])(http_sessions_endpoint)
+    logger.info("✓ HTTP /sessions endpoint registered successfully")
+except Exception as e:
+    logger.error(f"✗ Failed to register /sessions endpoint: {e}")
+    logger.error(traceback.format_exc())
+
 
 def main():
     """Main entry point for the MCP server."""
     try:
+        import anyio
+        import uvicorn
+
         # Initialize Logfire first
         setup_logfire(service_name="archon-mcp-server")
 
         logger.info("🚀 Starting Archon MCP Server")
-        logger.info("   Mode: Streamable HTTP")
+        logger.info("   Mode: Streamable HTTP (with session tracking middleware)")
         logger.info(f"   URL: http://{server_host}:{server_port}/mcp")
 
         mcp_logger.info("🔥 Logfire initialized for MCP server")
         mcp_logger.info(f"🌟 Starting MCP server - host={server_host}, port={server_port}")
 
-        mcp.run(transport="streamable-http")
+        async def run_with_middleware():
+            # Get FastMCP's Starlette app (includes /health, /sessions, /mcp routes)
+            starlette_app = mcp.streamable_http_app()
+
+            # Wrap with session tracking middleware (ASGI middleware)
+            wrapped_app = McpSessionTrackingMiddleware(starlette_app)
+
+            config = uvicorn.Config(
+                wrapped_app,
+                host=server_host,
+                port=server_port,
+                log_level="info",
+            )
+            server = uvicorn.Server(config)
+            await server.serve()
+
+        anyio.run(run_with_middleware)
 
     except Exception as e:
         mcp_logger.error(f"💥 Fatal error in main - error={str(e)}, error_type={type(e).__name__}")
