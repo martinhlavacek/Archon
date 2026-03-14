@@ -64,14 +64,56 @@ class TestDetectClientType:
     def test_detect_claude_generic(self):
         """Detects Claude from generic user agent containing 'claude'."""
         name, ctype = detect_client_type("mcp-client/claude")
-        assert name == "Claude Code"
-        assert ctype == "claude-code"
+        assert name == "Claude"
+        assert ctype == "claude"
 
     def test_detect_cursor(self):
         """Detects Cursor from user agent."""
         name, ctype = detect_client_type("cursor/0.45.0")
         assert name == "Cursor"
         assert ctype == "cursor"
+
+    def test_detect_windsurf(self):
+        """Detects Windsurf from user agent."""
+        name, ctype = detect_client_type("windsurf/1.0.0")
+        assert name == "Windsurf"
+        assert ctype == "windsurf"
+
+    def test_detect_windsurf_codeium(self):
+        """Detects Windsurf via Codeium user agent."""
+        name, ctype = detect_client_type("codeium-agent/2.0")
+        assert name == "Windsurf"
+        assert ctype == "windsurf"
+
+    def test_detect_vscode(self):
+        """Detects VS Code from user agent."""
+        name, ctype = detect_client_type("Visual Studio Code/1.90.0")
+        assert name == "VS Code"
+        assert ctype == "vscode"
+
+    def test_detect_vscode_short(self):
+        """Detects VS Code from short 'vscode' user agent."""
+        name, ctype = detect_client_type("vscode-mcp/0.1")
+        assert name == "VS Code"
+        assert ctype == "vscode"
+
+    def test_detect_jetbrains(self):
+        """Detects JetBrains IDE from user agent."""
+        name, ctype = detect_client_type("JetBrains-IntelliJ/2025.1")
+        assert name == "JetBrains"
+        assert ctype == "jetbrains"
+
+    def test_detect_jetbrains_intellij(self):
+        """Detects JetBrains via IntelliJ user agent."""
+        name, ctype = detect_client_type("IntelliJ IDEA/2025.1")
+        assert name == "JetBrains"
+        assert ctype == "jetbrains"
+
+    def test_detect_zed(self):
+        """Detects Zed editor from user agent."""
+        name, ctype = detect_client_type("zed/0.150.0")
+        assert name == "Zed"
+        assert ctype == "zed"
 
     def test_detect_unknown(self):
         """Returns unknown for unrecognized user agents."""

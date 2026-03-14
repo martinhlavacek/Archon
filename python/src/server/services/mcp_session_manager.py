@@ -22,7 +22,7 @@ class SessionInfo:
     created_at: datetime
     last_seen: datetime
     client_name: str = "Unknown Client"
-    client_type: str = "unknown"  # "claude-code" | "cursor" | "unknown"
+    client_type: str = "unknown"  # claude-code | claude | cursor | windsurf | vscode | jetbrains | zed | unknown
     connected_at: str = ""  # ISO 8601 string for JSON serialization
 
     def __post_init__(self):
@@ -41,10 +41,20 @@ def detect_client_type(user_agent: str | None) -> tuple[str, str]:
         return "Unknown Client", "unknown"
 
     ua_lower = user_agent.lower()
-    if "claude" in ua_lower or "claude-code" in ua_lower:
+    if "claude-code" in ua_lower:
         return "Claude Code", "claude-code"
+    elif "claude" in ua_lower:
+        return "Claude", "claude"
     elif "cursor" in ua_lower:
         return "Cursor", "cursor"
+    elif "windsurf" in ua_lower or "codeium" in ua_lower:
+        return "Windsurf", "windsurf"
+    elif "visual studio code" in ua_lower or "vscode" in ua_lower:
+        return "VS Code", "vscode"
+    elif "jetbrains" in ua_lower or "intellij" in ua_lower:
+        return "JetBrains", "jetbrains"
+    elif "zed" in ua_lower:
+        return "Zed", "zed"
     else:
         # Use first part of User-Agent as name
         name = user_agent.split("/")[0].strip()[:50]  # max 50 chars
