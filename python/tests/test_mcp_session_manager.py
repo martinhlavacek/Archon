@@ -263,3 +263,31 @@ class TestSimplifiedSessionManager:
         clients = mgr.get_clients()
         assert len(clients) == 1
         assert clients[0]["type"] == "cursor"
+
+    def test_register_session_new(self):
+        """register_session creates entry for unknown external session ID."""
+        mgr = SimplifiedSessionManager(timeout=3600)
+        mgr.register_session("fastmcp-session-abc", "claude-code/1.0")
+        assert "fastmcp-session-abc" in mgr.sessions
+        info = mgr.sessions["fastmcp-session-abc"]
+        assert info.client_name == "Claude Code"
+        assert info.client_type == "claude-code"
+
+    def test_register_session_existing_updates_last_seen(self):
+        """register_session updates last_seen for already-known session."""
+        mgr = SimplifiedSessionManager(timeout=3600)
+        mgr.register_session("fastmcp-session-abc", "cursor/1.0")
+        original_last_seen = mgr.sessions["fastmcp-session-abc"].last_seen
+
+        mgr.register_session("fastmcp-session-abc", "cursor/1.0")
+        assert mgr.sessions["fastmcp-session-abc"].last_seen >= original_last_seen
+        # Should still be only one session
+        assert len(mgr.sessions) == 1
+
+    def test_register_session_no_duplicates(self):
+        """Calling register_session repeatedly does not create duplicates."""
+        mgr = SimplifiedSessionManager(timeout=3600)
+        for _ in range(100):
+            mgr.register_session("same-id", "claude-code/1.0")
+        assert len(mgr.sessions) == 1
+        assert mgr.get_active_session_count() == 1
