@@ -232,6 +232,38 @@ async def get_mcp_config():
             raise HTTPException(status_code=500, detail={"error": str(e)}) from e
 
 
+async def get_mcp_sessions_data() -> dict[str, Any]:
+    """Get real session data from MCP server /sessions endpoint.
+
+    Returns:
+        Session data dict with active_sessions, session_timeout, clients, etc.
+        Falls back to empty defaults if MCP server is unreachable.
+    """
+    config = get_mcp_monitoring_config()
+    mcp_url = get_mcp_url()
+
+    try:
+        async with httpx.AsyncClient(timeout=config.health_check_timeout) as client:
+            response = await client.get(f"{mcp_url}/sessions")
+            response.raise_for_status()
+            data = response.json()
+            return {
+                "active_sessions": data.get("active_sessions", 0),
+                "session_timeout": data.get("session_timeout", 3600),
+                "server_uptime_seconds": data.get("uptime_seconds"),
+                "clients": data.get("clients", []),
+            }
+    except httpx.ConnectError:
+        api_logger.warning("MCP server unreachable for sessions data")
+        return {"active_sessions": 0, "session_timeout": 3600, "clients": []}
+    except httpx.TimeoutException:
+        api_logger.warning("MCP server sessions endpoint timed out")
+        return {"active_sessions": 0, "session_timeout": 3600, "clients": []}
+    except Exception:
+        api_logger.error("Failed to get MCP sessions data", exc_info=True)
+        return {"active_sessions": 0, "session_timeout": 3600, "clients": []}
+
+
 @router.get("/clients")
 async def get_mcp_clients():
     """Get connected MCP clients with type detection."""
@@ -240,11 +272,13 @@ async def get_mcp_clients():
         safe_set_attribute(span, "method", "GET")
 
         try:
-            # TODO: Implement real client detection in the future
-            # For now, return empty array as expected by frontend
-            api_logger.debug("Getting MCP clients - returning empty array")
+            sessions_data = await get_mcp_sessions_data()
+            clients = sessions_data.get("clients", [])
 
-            return {"clients": [], "total": 0}
+            api_logger.debug(f"Getting MCP clients - total={len(clients)}")
+            safe_set_attribute(span, "total_clients", len(clients))
+
+            return {"clients": clients, "total": len(clients)}
         except Exception as e:
             api_logger.error(f"Failed to get MCP clients - error={str(e)}")
             safe_set_attribute(span, "error", str(e))
@@ -259,17 +293,17 @@ async def get_mcp_sessions():
         safe_set_attribute(span, "method", "GET")
 
         try:
-            # Basic session info for now
-            status = await get_container_status()
+            sessions_data = await get_mcp_sessions_data()
 
             session_info = {
-                "active_sessions": 0,  # TODO: Implement real session tracking
-                "session_timeout": 3600,  # 1 hour default
+                "active_sessions": sessions_data.get("active_sessions", 0),
+                "session_timeout": sessions_data.get("session_timeout", 3600),
             }
 
-            # Add uptime if server is running
-            if status.get("status") == "running" and status.get("uptime"):
-                session_info["server_uptime_seconds"] = status["uptime"]
+            # Add uptime if available
+            uptime = sessions_data.get("server_uptime_seconds")
+            if uptime is not None:
+                session_info["server_uptime_seconds"] = uptime
 
             api_logger.debug(f"MCP session info - sessions={session_info.get('active_sessions')}")
             safe_set_attribute(span, "active_sessions", session_info.get("active_sessions"))
