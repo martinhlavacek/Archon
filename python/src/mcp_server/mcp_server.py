@@ -574,16 +574,18 @@ class McpSessionTrackingMiddleware:
         if not path.startswith("/mcp"):
             return await self.app(scope, receive, send)
 
-        # Extract request headers
+        # Extract request headers and client info
         headers = dict(scope.get("headers", []))
         req_session_id = headers.get(b"mcp-session-id", b"").decode("utf-8", errors="ignore")
         user_agent = headers.get(b"user-agent", b"").decode("utf-8", errors="ignore") or None
+        client_addr = scope.get("client")
+        client_ip = client_addr[0] if client_addr else ""
 
         session_manager = get_session_manager()
 
         # If request already carries a known session ID, just touch last_seen
         if req_session_id:
-            session_manager.register_session(req_session_id, user_agent)
+            session_manager.register_session(req_session_id, user_agent, client_ip)
 
         # Intercept response headers to capture FastMCP-assigned session IDs
         async def send_wrapper(message):
@@ -593,7 +595,7 @@ class McpSessionTrackingMiddleware:
                     if key == b"mcp-session-id":
                         resp_session_id = value.decode("utf-8", errors="ignore")
                         if resp_session_id:
-                            session_manager.register_session(resp_session_id, user_agent)
+                            session_manager.register_session(resp_session_id, user_agent, client_ip)
                         break
             await send(message)
 

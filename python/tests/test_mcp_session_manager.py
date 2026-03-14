@@ -22,11 +22,15 @@ class TestSessionInfo:
             last_seen=now,
             client_name="Claude Code",
             client_type="claude-code",
+            client_version="1.0.0",
+            client_ip="192.168.1.100",
         )
         assert info.created_at == now
         assert info.last_seen == now
         assert info.client_name == "Claude Code"
         assert info.client_type == "claude-code"
+        assert info.client_version == "1.0.0"
+        assert info.client_ip == "192.168.1.100"
 
     def test_session_info_connected_at_auto_fill(self):
         """connected_at is auto-filled from created_at if not provided."""
@@ -45,100 +49,121 @@ class TestSessionInfo:
         assert info.connected_at == "2026-01-01T00:00:00"
 
     def test_session_info_defaults(self):
-        """Default values for client_name and client_type."""
+        """Default values for client_name, client_type, version, ip."""
         now = datetime.now()
         info = SessionInfo(created_at=now, last_seen=now)
         assert info.client_name == "Unknown Client"
         assert info.client_type == "unknown"
+        assert info.client_version == ""
+        assert info.client_ip == ""
 
 
 class TestDetectClientType:
     """Tests for detect_client_type helper function."""
 
     def test_detect_claude_code(self):
-        """Detects Claude Code from user agent."""
-        name, ctype = detect_client_type("claude-code/1.0.0")
+        """Detects Claude Code with version from user agent."""
+        name, ctype, version = detect_client_type("claude-code/1.0.0")
         assert name == "Claude Code"
         assert ctype == "claude-code"
+        assert version == "1.0.0"
 
     def test_detect_claude_generic(self):
         """Detects Claude from generic user agent containing 'claude'."""
-        name, ctype = detect_client_type("mcp-client/claude")
+        name, ctype, version = detect_client_type("mcp-client/claude")
         assert name == "Claude"
         assert ctype == "claude"
 
     def test_detect_cursor(self):
         """Detects Cursor from user agent."""
-        name, ctype = detect_client_type("cursor/0.45.0")
+        name, ctype, version = detect_client_type("cursor/0.45.0")
         assert name == "Cursor"
         assert ctype == "cursor"
+        assert version == "0.45.0"
 
     def test_detect_windsurf(self):
         """Detects Windsurf from user agent."""
-        name, ctype = detect_client_type("windsurf/1.0.0")
+        name, ctype, version = detect_client_type("windsurf/1.0.0")
         assert name == "Windsurf"
         assert ctype == "windsurf"
 
     def test_detect_windsurf_codeium(self):
         """Detects Windsurf via Codeium user agent."""
-        name, ctype = detect_client_type("codeium-agent/2.0")
+        name, ctype, version = detect_client_type("codeium-agent/2.0")
         assert name == "Windsurf"
         assert ctype == "windsurf"
 
     def test_detect_vscode(self):
         """Detects VS Code from user agent."""
-        name, ctype = detect_client_type("Visual Studio Code/1.90.0")
+        name, ctype, version = detect_client_type("Visual Studio Code/1.90.0")
         assert name == "VS Code"
         assert ctype == "vscode"
+        assert version == "1.90.0"
 
     def test_detect_vscode_short(self):
         """Detects VS Code from short 'vscode' user agent."""
-        name, ctype = detect_client_type("vscode-mcp/0.1")
+        name, ctype, version = detect_client_type("vscode-mcp/0.1")
         assert name == "VS Code"
         assert ctype == "vscode"
 
     def test_detect_jetbrains(self):
         """Detects JetBrains IDE from user agent."""
-        name, ctype = detect_client_type("JetBrains-IntelliJ/2025.1")
+        name, ctype, version = detect_client_type("JetBrains-IntelliJ/2025.1")
         assert name == "JetBrains"
         assert ctype == "jetbrains"
 
     def test_detect_jetbrains_intellij(self):
         """Detects JetBrains via IntelliJ user agent."""
-        name, ctype = detect_client_type("IntelliJ IDEA/2025.1")
+        name, ctype, version = detect_client_type("IntelliJ IDEA/2025.1")
         assert name == "JetBrains"
         assert ctype == "jetbrains"
 
     def test_detect_zed(self):
         """Detects Zed editor from user agent."""
-        name, ctype = detect_client_type("zed/0.150.0")
+        name, ctype, version = detect_client_type("zed/0.150.0")
         assert name == "Zed"
         assert ctype == "zed"
 
     def test_detect_unknown(self):
         """Returns unknown for unrecognized user agents."""
-        name, ctype = detect_client_type("some-editor/1.0")
+        name, ctype, version = detect_client_type("some-editor/1.0")
         assert name == "some-editor"
         assert ctype == "unknown"
+        assert version == "1.0"
 
     def test_detect_none(self):
         """Returns defaults for None user agent."""
-        name, ctype = detect_client_type(None)
+        name, ctype, version = detect_client_type(None)
         assert name == "Unknown Client"
         assert ctype == "unknown"
+        assert version == ""
 
     def test_detect_empty_string(self):
         """Returns defaults for empty user agent."""
-        name, ctype = detect_client_type("")
+        name, ctype, version = detect_client_type("")
         assert name == "Unknown Client"
         assert ctype == "unknown"
+        assert version == ""
 
     def test_detect_truncates_long_name(self):
         """Truncates very long user agent names to 50 chars."""
         long_agent = "a" * 100 + "/1.0"
-        name, ctype = detect_client_type(long_agent)
+        name, ctype, version = detect_client_type(long_agent)
         assert len(name) <= 50
         assert ctype == "unknown"
+        assert version == "1.0"
+
+    def test_version_parsing_with_extra_info(self):
+        """Parses version from user agent with extra info after version."""
+        name, ctype, version = detect_client_type("claude-code/1.2.3 (Linux x86_64)")
+        assert name == "Claude Code"
+        assert version == "1.2.3"
+
+    def test_version_parsing_no_version(self):
+        """Returns empty version when no slash in user agent."""
+        name, ctype, version = detect_client_type("claude-code")
+        assert name == "Claude Code"
+        assert version == ""
 
 
 class TestSimplifiedSessionManager:
@@ -152,7 +177,16 @@ class TestSimplifiedSessionManager:
         info = mgr.sessions[session_id]
         assert info.client_name == "Claude Code"
         assert info.client_type == "claude-code"
+        assert info.client_version == "1.0.0"
         assert info.connected_at
+
+    def test_create_session_with_ip(self):
+        """Creates session with client IP."""
+        mgr = SimplifiedSessionManager(timeout=3600)
+        session_id = mgr.create_session("cursor/0.45.0", client_ip="192.168.1.100")
+        info = mgr.sessions[session_id]
+        assert info.client_ip == "192.168.1.100"
+        assert info.client_version == "0.45.0"
 
     def test_create_session_without_user_agent(self):
         """Backward compatibility - creates session without user agent."""
@@ -162,6 +196,8 @@ class TestSimplifiedSessionManager:
         info = mgr.sessions[session_id]
         assert info.client_name == "Unknown Client"
         assert info.client_type == "unknown"
+        assert info.client_version == ""
+        assert info.client_ip == ""
 
     def test_validate_session_existing(self):
         """Valid session returns True and updates last_seen."""
@@ -229,10 +265,10 @@ class TestSimplifiedSessionManager:
         assert mgr.get_clients() == []
 
     def test_get_clients_with_sessions(self):
-        """Returns correct client data format."""
+        """Returns correct client data format including version and ip."""
         mgr = SimplifiedSessionManager(timeout=3600)
-        mgr.create_session("claude-code/1.0")
-        mgr.create_session("cursor/2.0")
+        mgr.create_session("claude-code/1.0", client_ip="10.0.0.1")
+        mgr.create_session("cursor/2.0", client_ip="10.0.0.2")
 
         clients = mgr.get_clients()
         assert len(clients) == 2
@@ -242,6 +278,8 @@ class TestSimplifiedSessionManager:
         assert "id" in client
         assert "name" in client
         assert "type" in client
+        assert "version" in client
+        assert "ip" in client
         assert "connected_at" in client
         assert "status" in client
         assert client["status"] == "connected"
@@ -250,6 +288,11 @@ class TestSimplifiedSessionManager:
         types = {c["type"] for c in clients}
         assert "claude-code" in types
         assert "cursor" in types
+
+        # Check version and ip
+        ips = {c["ip"] for c in clients}
+        assert "10.0.0.1" in ips
+        assert "10.0.0.2" in ips
 
     def test_get_clients_excludes_expired(self):
         """Expired sessions are not included in clients list."""
@@ -267,11 +310,13 @@ class TestSimplifiedSessionManager:
     def test_register_session_new(self):
         """register_session creates entry for unknown external session ID."""
         mgr = SimplifiedSessionManager(timeout=3600)
-        mgr.register_session("fastmcp-session-abc", "claude-code/1.0")
+        mgr.register_session("fastmcp-session-abc", "claude-code/1.0", "10.0.0.1")
         assert "fastmcp-session-abc" in mgr.sessions
         info = mgr.sessions["fastmcp-session-abc"]
         assert info.client_name == "Claude Code"
         assert info.client_type == "claude-code"
+        assert info.client_version == "1.0"
+        assert info.client_ip == "10.0.0.1"
 
     def test_register_session_existing_updates_last_seen(self):
         """register_session updates last_seen for already-known session."""
