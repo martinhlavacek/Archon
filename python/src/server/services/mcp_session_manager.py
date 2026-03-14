@@ -88,6 +88,26 @@ class SimplifiedSessionManager:
         logger.info(f"Created new session: {session_id} client={client_name}")
         return session_id
 
+    def register_session(self, session_id: str, user_agent: str | None = None) -> None:
+        """Register an externally-managed session ID (e.g. from FastMCP).
+
+        If the session already exists, just updates last_seen.
+        If new, creates a SessionInfo entry keyed by the external ID.
+        """
+        if session_id in self.sessions:
+            self.sessions[session_id].last_seen = datetime.now()
+            return
+
+        client_name, client_type = detect_client_type(user_agent)
+        now = datetime.now()
+        self.sessions[session_id] = SessionInfo(
+            created_at=now,
+            last_seen=now,
+            client_name=client_name,
+            client_type=client_type,
+        )
+        logger.info(f"Registered external session: {session_id} client={client_name}")
+
     def validate_session(self, session_id: str) -> bool:
         """Validate a session ID and update last seen time"""
         if session_id not in self.sessions:

@@ -555,32 +555,49 @@ _server_start_time = time.time()
 
 
 class McpSessionTrackingMiddleware:
-    """ASGI middleware that tracks MCP client sessions from mcp-session-id headers."""
+    """ASGI middleware that tracks MCP client sessions.
+
+    Captures FastMCP's mcp-session-id from *response* headers and registers it
+    in our session manager.  On subsequent requests the middleware validates
+    the session (updates last_seen).  It never creates its own session IDs —
+    it only mirrors what FastMCP assigns.
+    """
 
     def __init__(self, app):
         self.app = app
 
     async def __call__(self, scope, receive, send):
-        if scope["type"] == "http":
-            path = scope.get("path", "")
-            if path.startswith("/mcp"):
-                # Extract headers from ASGI scope
-                headers = dict(scope.get("headers", []))
-                session_id = headers.get(b"mcp-session-id", b"").decode("utf-8", errors="ignore")
-                user_agent = headers.get(b"user-agent", b"").decode("utf-8", errors="ignore") or None
+        if scope["type"] != "http":
+            return await self.app(scope, receive, send)
 
-                session_manager = get_session_manager()
+        path = scope.get("path", "")
+        if not path.startswith("/mcp"):
+            return await self.app(scope, receive, send)
 
-                if session_id:
-                    # Existing client - validate/update
-                    if not session_manager.validate_session(session_id):
-                        # Session expired, create new one
-                        session_manager.create_session(user_agent)
-                else:
-                    # New client - create session
-                    session_manager.create_session(user_agent)
+        # Extract request headers
+        headers = dict(scope.get("headers", []))
+        req_session_id = headers.get(b"mcp-session-id", b"").decode("utf-8", errors="ignore")
+        user_agent = headers.get(b"user-agent", b"").decode("utf-8", errors="ignore") or None
 
-        return await self.app(scope, receive, send)
+        session_manager = get_session_manager()
+
+        # If request already carries a known session ID, just touch last_seen
+        if req_session_id:
+            session_manager.register_session(req_session_id, user_agent)
+
+        # Intercept response headers to capture FastMCP-assigned session IDs
+        async def send_wrapper(message):
+            if message["type"] == "http.response.start":
+                resp_headers = message.get("headers", [])
+                for key, value in resp_headers:
+                    if key == b"mcp-session-id":
+                        resp_session_id = value.decode("utf-8", errors="ignore")
+                        if resp_session_id:
+                            session_manager.register_session(resp_session_id, user_agent)
+                        break
+            await send(message)
+
+        return await self.app(scope, receive, send_wrapper)
 
 
 # Define health endpoint function at module level
