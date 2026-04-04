@@ -448,7 +448,7 @@ class DocumentService:
                 from .versioning_service import VersioningService
                 versioning = VersioningService(self.supabase_client)
                 change_summary = self._build_change_summary(doc_id, update_fields)
-                await versioning.create_version(
+                versioning.create_version(
                     project_id=project_id,
                     field_name="docs",
                     content=current_docs,
