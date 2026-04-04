@@ -7,6 +7,8 @@ This module handles page retrieval operations for RAG:
 - Get page by URL
 """
 
+import json
+
 from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel
 
@@ -180,6 +182,8 @@ async def get_page_by_url(url: str = Query(..., description="The URL of the page
                 raise HTTPException(status_code=404, detail=f"Page not found for URL: {url}")
 
             page_data = _handle_large_page_content(row_to_dict(row))
+            if isinstance(page_data.get("metadata"), str):
+                page_data["metadata"] = json.loads(page_data["metadata"])
             return PageResponse(**page_data)
         else:
             client = get_supabase_client()
@@ -225,6 +229,8 @@ async def get_page_by_id(page_id: str):
                 raise HTTPException(status_code=404, detail=f"Page not found: {page_id}")
 
             page_data = _handle_large_page_content(row_to_dict(row))
+            if isinstance(page_data.get("metadata"), str):
+                page_data["metadata"] = json.loads(page_data["metadata"])
             return PageResponse(**page_data)
         else:
             client = get_supabase_client()

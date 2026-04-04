@@ -416,7 +416,7 @@ async def update_project(project_id: str, request: UpdateProjectRequest):
 
                             # Only create version if content actually changed
                             if current_content != new_content:
-                                v_success, _ = versioning_service.create_version(
+                                v_success, _ = await versioning_service.create_version(
                                     project_id=project_id,
                                     field_name=field_name,
                                     content=current_content,
@@ -1135,7 +1135,7 @@ async def list_project_versions(project_id: str, field_name: str = None):
 
         # Use VersioningService to list versions
         versioning_service = VersioningService()
-        success, result = versioning_service.list_versions(project_id, field_name)
+        success, result = await versioning_service.list_versions(project_id, field_name)
 
         if not success:
             if "not found" in result.get("error", "").lower():
@@ -1166,7 +1166,7 @@ async def create_project_version(project_id: str, request: CreateVersionRequest)
 
         # Use VersioningService to create version
         versioning_service = VersioningService()
-        success, result = versioning_service.create_version(
+        success, result = await versioning_service.create_version(
             project_id=project_id,
             field_name=request.field_name,
             content=request.content,
@@ -1205,7 +1205,7 @@ async def get_project_version(project_id: str, field_name: str, version_number: 
 
         # Use VersioningService to get version content
         versioning_service = VersioningService()
-        success, result = versioning_service.get_version_content(
+        success, result = await versioning_service.get_version_content(
             project_id, field_name, version_number
         )
 
@@ -1242,7 +1242,7 @@ async def restore_project_version(
 
         # Use VersioningService to restore version
         versioning_service = VersioningService()
-        success, result = versioning_service.restore_version(
+        success, result = await versioning_service.restore_version(
             project_id=project_id,
             field_name=field_name,
             version_number=version_number,
